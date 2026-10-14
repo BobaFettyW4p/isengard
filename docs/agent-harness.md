@@ -79,6 +79,14 @@ Claude Code asks "do you trust this folder?" the first time it runs in a repo. T
 **main repo path**, so it happens once per repo, not per worktree (verified: a second worktree in the same repo skipped it).
 For an untrusted repo, `agent new` marks the agent `needs-you` and prints a note; attach and accept once.
 
+## Verified live
+
+A real agent in a throwaway repo: wrote a file (auto-accepted), ran `date` (no prompt), and ended `done`. A follow-up
+that ran `mkdir` flipped it to `needs-you` with the event logged; approving it returned it to `done`.
+Claude Code auto-approves a few harmless read-only commands (such as `date`) on its own, so the allowlist only needs to
+cover everything beyond those. The permission prompt also offers "always allow" and an "auto mode" option; v0 doesn't
+use either.
+
 ## Known rough edges
 
 - **"Last output" in `ls`** is scraped from Claude's terminal UI and is approximate. `peek` shows the real screen.

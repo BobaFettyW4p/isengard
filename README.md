@@ -36,5 +36,5 @@ Run the self-test any time with `tests/lifecycle.sh`.
 
 ## Status
 
-v0 works end to end with a fake agent. A live Claude run is pending a fresh `/login` on the server.
+v0 works end to end, including a live Claude agent on the server (status hooks, permission stops, cleanup).
 See the [roadmap](docs/roadmap.md).

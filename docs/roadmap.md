@@ -1,10 +1,10 @@
 # Roadmap
 
-## Open items (blocking a live test)
+## Open items
 
-- [ ] Re-login to Claude Code on the server (`claude`, then `/login`). The stored login expired.
-- [ ] `gh auth login` on the server (HTTPS), so `agent new owner/repo ...` can clone and push.
-- [ ] Run one real agent end to end and confirm the hooks move it working to done.
+- [x] Re-login to Claude Code on the server (`claude`, then `/login`).
+- [x] `gh auth login` on the server (HTTPS), so `agent new owner/repo ...` can clone and push.
+- [x] Run one real agent end to end and confirm the hooks move it working, needs-you, done (verified 2026-10-13).
 - [ ] Pick the first real project and point `agent` at it.
 
 ## Server housekeeping still open
