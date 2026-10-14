@@ -40,6 +40,7 @@ agent setup                         create ~/agents, default allowlist, install 
 | `done` | Finished its turn | `Stop` hook |
 | `exited` | The process ended (the tmux pane is kept) | tmux pane state |
 | `gone` | The tmux session no longer exists | tmux |
+| `OFF-BRANCH` | The worktree is no longer on the agent's own branch | `agent ls`, checked live |
 
 Claude's own "waiting for your input" idle reminder arrives as a `Notification` too; `agent hook` ignores it so it
 doesn't overwrite `done`.
@@ -72,6 +73,18 @@ v0 has no sandbox. Safety comes from **pre-approving only safe commands and lett
 File edits inside the worktree are auto-accepted. `git push`, installs, network access and anything unlisted prompt.
 That is what makes "fire and forget" workable: an agent works as far as the allowlist goes, then blocks on a prompt
 instead of doing something risky. Edit `~/agents/allowlist.json` to change the default for new worktrees.
+
+## Branch guard
+
+Agents never start on the default branch. `agent new` refuses, before creating a worktree, state file or tmux
+session, if the branch it would use is `main`, `master`, or the repo's default branch (from `origin/HEAD`).
+After creating the worktree it also checks what git actually checked out; if that isn't the agent's own
+`agent/<name>` branch, it removes the worktree and refuses.
+
+The guard is at start time. If an agent later switches its worktree to another branch, `agent ls` shows it as
+`OFF-BRANCH` (with the branch it's on) instead of its normal status. That is a visibility flag, not prevention;
+`git push` isn't on the allowlist, so a push still stops at a prompt. For a hard stop, enable branch protection on
+the default branch in GitHub so direct pushes are rejected.
 
 ## Folder trust
 

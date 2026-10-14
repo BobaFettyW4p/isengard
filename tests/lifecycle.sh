@@ -82,6 +82,12 @@ pass "events logged"
 "$A" peek "$NAME" >/dev/null || fail "peek failed"
 pass "peek"
 
+git -C "$wt" switch -q -c rogue
+[[ "$(status_of "$NAME")" == OFF-BRANCH ]] || fail "off-branch worktree not flagged (got '$(status_of "$NAME")')"
+git -C "$wt" switch -q "agent/$NAME"
+[[ "$(status_of "$NAME")" == done ]] || fail "status should recover once back on its branch"
+pass "agent moved off its branch is flagged OFF-BRANCH"
+
 echo x > "$wt/dirty.txt"
 if "$A" rm "$NAME" >/dev/null 2>&1; then fail "rm should refuse a dirty worktree"; fi
 pass "rm refuses dirty worktree"
@@ -91,5 +97,17 @@ pass "rm refuses dirty worktree"
 git -C "$T/repo" show-ref --verify --quiet "refs/heads/agent/$NAME" || fail "branch should be kept"
 tmux has-session -t "agent-$NAME" 2>/dev/null && fail "tmux session still alive"
 pass "rm --force removes worktree and session, keeps branch"
+
+# Start guard: if the repo's default branch is the branch an agent would use,
+# refuse before creating a worktree, state or session.
+git -C "$T/repo" update-ref refs/remotes/origin/agent/guardtest HEAD
+git -C "$T/repo" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/agent/guardtest
+if out="$(AGENT_CMD="$T/fake.sh" "$A" new "$T/repo" guardtest "x" 2>&1)"; then fail "agent started on a protected branch"; fi
+grep -q "refusing" <<<"$out" || fail "guard message missing: $out"
+[[ ! -e "$AGENTS_HOME/state/guardtest.env" ]] || fail "guard left state behind"
+[[ ! -d "$AGENTS_HOME/work/repo-guardtest" ]] || fail "guard left a worktree behind"
+tmux has-session -t agent-guardtest 2>/dev/null && fail "guard left a tmux session behind"
+git -C "$T/repo" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+pass "agent refuses to start on the default branch"
 
 echo "all passed"
