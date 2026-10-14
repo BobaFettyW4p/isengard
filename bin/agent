@@ -1,0 +1,298 @@
+#!/usr/bin/env bash
+# agent: run Claude Code agents as a git worktree + tmux session.
+set -euo pipefail
+
+AGENTS_HOME="${AGENTS_HOME:-$HOME/agents}"
+REPOS="$AGENTS_HOME/repos"
+WORK="$AGENTS_HOME/work"
+STATE="$AGENTS_HOME/state"
+EVENTS="$AGENTS_HOME/events.log"
+ALLOWLIST="$AGENTS_HOME/allowlist.json"
+AGENT_CMD="${AGENT_CMD:-claude}"
+MEM_MAX="${AGENT_MEM_MAX:-8G}"
+CPU_QUOTA="${AGENT_CPU_QUOTA:-800%}"
+BIN="$HOME/.local/bin/agent"
+
+die() { echo "agent: $*" >&2; exit 1; }
+now() { date +%s; }
+sess() { echo "agent-$1"; }
+
+usage() {
+  cat <<'EOF'
+usage: agent <command>
+
+  new <repo> <name> [task...]   worktree + tmux session + claude (task = first prompt)
+                                <repo>: owner/name (cloned with gh), a git URL, a
+                                name under ~/agents/repos, or a path to a local repo
+  ls                            all agents: status, age, last output line
+  peek <name> [lines]           print the agent's recent terminal output
+  attach <name>                 attach to its tmux session (detach: Ctrl-b d)
+  diff <name>                   commits and changes on the agent's branch
+  log [n]                       recent events (needs-you / done)
+  rm <name> [--force]           stop the agent, remove its worktree (branch is kept)
+  setup                         create ~/agents, default allowlist, install hooks
+
+statuses: working | needs-you | done | exited | gone
+EOF
+}
+
+set_status() { printf '%s %s\n' "$2" "$(now)" > "$STATE/$1.status"; }
+log_event() { printf '%s %-14s %-10s %s\n' "$(date '+%F %T')" "$1" "$2" "$3" >> "$EVENTS"; }
+
+load() {
+  [[ -f "$STATE/$1.env" ]] || die "no such agent: $1"
+  # shellcheck disable=SC1090
+  source "$STATE/$1.env"
+}
+
+human_age() {
+  local s=$1
+  if   (( s < 60 ));    then echo "${s}s"
+  elif (( s < 3600 ));  then echo "$((s / 60))m"
+  elif (( s < 86400 )); then echo "$((s / 3600))h"
+  else echo "$((s / 86400))d"; fi
+}
+
+resolve_repo() {
+  local spec="$1" base dest
+  if [[ -d "$REPOS/$spec/.git" ]]; then echo "$REPOS/$spec"; return; fi
+  if [[ -d "$spec/.git" ]]; then (cd "$spec" && pwd -P); return; fi
+  if [[ "$spec" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+    dest="$REPOS/${spec##*/}"
+    [[ -d "$dest/.git" ]] || gh repo clone "$spec" "$dest" >&2
+  elif [[ "$spec" =~ ^(https?://|git@|ssh://) ]]; then
+    base="$(basename "${spec%.git}")"
+    dest="$REPOS/$base"
+    [[ -d "$dest/.git" ]] || git clone "$spec" "$dest" >&2
+  else
+    die "can't resolve repo '$spec' (try owner/name, a git URL, or a local path)"
+  fi
+  echo "$dest"
+}
+
+base_ref() {
+  local repo="$1" h
+  if git -C "$repo" remote get-url origin >/dev/null 2>&1; then
+    git -C "$repo" fetch --quiet origin || true
+    h="$(git -C "$repo" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)"
+    if [[ -n "$h" ]]; then echo "$h"; return; fi
+  fi
+  git -C "$repo" rev-parse --abbrev-ref HEAD
+}
+
+cmd_new() {
+  [[ $# -ge 2 ]] || die "usage: agent new <repo> <name> [task...]"
+  local spec="$1" name="$2"
+  shift 2
+  local task="$*"
+  [[ "$name" =~ ^[a-z0-9][a-z0-9-]*$ ]] || die "name must match [a-z0-9-]+"
+  [[ ! -e "$STATE/$name.env" ]] || die "agent '$name' already exists"
+  if tmux has-session -t "$(sess "$name")" 2>/dev/null; then die "tmux session $(sess "$name") already exists"; fi
+
+  mkdir -p "$REPOS" "$WORK" "$STATE"
+  local repo repobase base branch wt excl
+  repo="$(resolve_repo "$spec")"
+  repobase="$(basename "$repo")"
+  branch="agent/$name"
+  wt="$WORK/$repobase-$name"
+  base="$(base_ref "$repo")"
+
+  if git -C "$repo" show-ref --verify --quiet "refs/heads/$branch"; then
+    git -C "$repo" worktree add "$wt" "$branch" >&2
+  else
+    git -C "$repo" worktree add --no-track -b "$branch" "$wt" "$base" >&2
+  fi
+
+  # Per-worktree permission allowlist; keep it out of git.
+  excl="$(git -C "$repo" rev-parse --path-format=absolute --git-path info/exclude)"
+  grep -qxF '.claude/settings.local.json' "$excl" 2>/dev/null || echo '.claude/settings.local.json' >> "$excl"
+  write_allowlist
+  mkdir -p "$wt/.claude"
+  [[ -e "$wt/.claude/settings.local.json" ]] || cp "$ALLOWLIST" "$wt/.claude/settings.local.json"
+
+  {
+    printf 'REPO=%q\n' "$repo"
+    printf 'BRANCH=%q\n' "$branch"
+    printf 'BASE=%q\n' "$base"
+    printf 'WORKTREE=%q\n' "$wt"
+    printf 'STARTED=%q\n' "$(now)"
+  } > "$STATE/$name.env"
+
+  local cmd
+  cmd="env AGENT_NAME=$(printf %q "$name") AGENTS_HOME=$(printf %q "$AGENTS_HOME") systemd-run --user --scope --quiet -p MemoryMax=$MEM_MAX -p CPUQuota=$CPU_QUOTA -- $AGENT_CMD"
+  if [[ -n "$task" ]]; then cmd+=" $(printf %q "$task")"; fi
+  tmux new-session -d -s "$(sess "$name")" -c "$wt" "$cmd"
+  tmux set-option -t "$(sess "$name")" remain-on-exit on >/dev/null
+  # Claude records folder trust per main repo; the first agent in a repo blocks on the prompt.
+  if [[ "$(jq -r --arg p "$repo" '.projects[$p].hasTrustDialogAccepted // false' "$HOME/.claude.json" 2>/dev/null || echo false)" != true ]]; then
+    set_status "$name" needs-you
+    log_event "$name" needs-you "first agent in $repobase: attach and accept the folder-trust prompt once"
+    echo "note: first agent in $repobase is waiting on Claude's folder-trust prompt; attach and accept once"
+  elif [[ -n "$task" ]]; then set_status "$name" working
+  else set_status "$name" done; fi
+  echo "started '$name' on $branch (base $base)"
+  echo "  worktree: $wt"
+  echo "  watch:    agent attach $name   |   agent peek $name"
+}
+
+last_line() {
+  tmux capture-pane -p -t "$1" -S -30 2>/dev/null \
+    | grep -Ev '^[[:space:]│─╭╮╰╯┌┐└┘>?]*$' | tail -n1 \
+    | sed 's/^[[:space:]]*//' | cut -c1-60 || true
+}
+
+cmd_ls() {
+  shopt -s nullglob
+  local files=("$STATE"/*.env) f name
+  if (( ${#files[@]} == 0 )); then echo "no agents"; return; fi
+  printf '%-14s %-16s %-10s %-5s %s\n' NAME REPO STATUS AGE LAST
+  for f in "${files[@]}"; do
+    name="$(basename "$f" .env)"
+    (
+      load "$name"
+      s="$(sess "$name")"; status=gone; age=""; last=""
+      if tmux has-session -t "$s" 2>/dev/null; then
+        status=working; ts="$(now)"
+        [[ -f "$STATE/$name.status" ]] && read -r status ts < "$STATE/$name.status"
+        [[ "$(tmux display-message -p -t "$s" '#{pane_dead}')" == 1 ]] && status=exited
+        age="$(human_age $(( $(now) - ts )))"
+        last="$(last_line "$s")"
+      fi
+      printf '%-14s %-16s %-10s %-5s %s\n' "$name" "$(basename "$REPO")" "$status" "$age" "$last"
+    )
+  done
+}
+
+cmd_peek() {
+  local name="${1:?usage: agent peek <name> [lines]}" n="${2:-40}"
+  load "$name"
+  tmux has-session -t "$(sess "$name")" 2>/dev/null || die "session for '$name' is gone"
+  tmux capture-pane -p -t "$(sess "$name")" -S "-$n" \
+    | awk '{ l[NR] = $0 } NF { p = NR } END { for (i = 1; i <= p; i++) print l[i] }'
+}
+
+cmd_attach() {
+  local name="${1:?usage: agent attach <name>}"
+  load "$name"
+  tmux has-session -t "$(sess "$name")" 2>/dev/null || die "session for '$name' is gone"
+  if [[ -n "${TMUX:-}" ]]; then exec tmux switch-client -t "$(sess "$name")"; fi
+  exec tmux attach -t "$(sess "$name")"
+}
+
+cmd_diff() {
+  local name="${1:?usage: agent diff <name>}"
+  load "$name"
+  echo "== $BRANCH (base: $BASE) in $WORKTREE"
+  git -C "$WORKTREE" log --oneline "$BASE..HEAD" || true
+  git -C "$WORKTREE" status -sb
+  git -C "$WORKTREE" diff --stat "$BASE" || true
+}
+
+cmd_log() {
+  [[ -f "$EVENTS" ]] || { echo "no events yet"; return; }
+  tail -n "${1:-20}" "$EVENTS"
+}
+
+cmd_rm() {
+  local name="${1:?usage: agent rm <name> [--force]}" force="${2:-}"
+  [[ -z "$force" || "$force" == "--force" ]] || die "unknown option: $force"
+  load "$name"
+  if [[ -d "$WORKTREE" && -z "$force" ]]; then
+    [[ -z "$(git -C "$WORKTREE" status --porcelain)" ]] \
+      || die "worktree has uncommitted changes (agent rm $name --force to discard)"
+  fi
+  tmux kill-session -t "$(sess "$name")" 2>/dev/null || true
+  if [[ -d "$WORKTREE" ]]; then git -C "$REPO" worktree remove ${force:+--force} "$WORKTREE"; fi
+  rm -f "$STATE/$name.env" "$STATE/$name.status"
+  echo "removed '$name'; branch $BRANCH kept (delete: git -C $REPO branch -D $BRANCH)"
+}
+
+# Called by Claude Code hooks: agent hook <working|needs-you|done>
+cmd_hook() {
+  local event="${1:?}" name="${AGENT_NAME:-}" payload="" msg=""
+  [[ -n "$name" && -d "$STATE" ]] || exit 0
+  if [[ "$event" == needs-you ]]; then
+    payload="$(cat || true)"
+    msg="$(printf '%s' "$payload" | jq -r '.message // empty' 2>/dev/null || true)"
+    # Claude's idle reminder arrives as a Notification; don't mask "done" with it.
+    if [[ "$msg" == *"waiting for your input"* ]]; then exit 0; fi
+  fi
+  set_status "$name" "$event"
+  if [[ "$event" != working ]]; then log_event "$name" "$event" "$msg"; fi
+}
+
+install_hooks() {
+  local settings="$HOME/.claude/settings.json" tmp
+  mkdir -p "$HOME/.claude"
+  [[ -f "$settings" ]] || echo '{}' > "$settings"
+  cp "$settings" "$settings.bak-$(now)"
+  tmp="$(mktemp)"
+  jq --arg c "$BIN" '
+    def add($ev; $arg):
+      .hooks[$ev] = ((.hooks[$ev] // [])
+        | map(select(((.hooks // []) | any((.command // "") | startswith($c))) | not))
+        + [{"hooks": [{"type": "command", "command": ($c + " hook " + $arg)}]}]);
+    .hooks //= {}
+    | add("UserPromptSubmit"; "working")
+    | add("PostToolUse"; "working")
+    | add("Notification"; "needs-you")
+    | add("Stop"; "done")
+  ' "$settings" > "$tmp"
+  mv "$tmp" "$settings"
+  echo "hooks installed in $settings (backup: $settings.bak-*)"
+}
+
+write_allowlist() {
+  mkdir -p "$AGENTS_HOME"
+  if [[ ! -f "$ALLOWLIST" ]]; then
+    cat > "$ALLOWLIST" <<'EOF'
+{
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "allow": [
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(ls:*)",
+      "Bash(grep:*)",
+      "Bash(rg:*)",
+      "Bash(pytest:*)",
+      "Bash(uv run pytest:*)",
+      "Bash(ruff:*)",
+      "Bash(uv run ruff:*)",
+      "Bash(npm test:*)",
+      "Bash(npm run test:*)",
+      "Bash(npm run lint:*)",
+      "Bash(npm run build:*)",
+      "Bash(make test:*)"
+    ]
+  }
+}
+EOF
+    echo "wrote $ALLOWLIST (copied into each new worktree; edit to taste)" >&2
+  fi
+}
+
+cmd_setup() {
+  mkdir -p "$REPOS" "$WORK" "$STATE" "$HOME/.local/bin"
+  write_allowlist
+  install_hooks
+}
+
+command -v tmux >/dev/null || die "tmux not found"
+case "${1:-}" in
+  new)         shift; cmd_new "$@" ;;
+  ls|list)     cmd_ls ;;
+  peek)        shift; cmd_peek "$@" ;;
+  attach)      shift; cmd_attach "$@" ;;
+  diff)        shift; cmd_diff "$@" ;;
+  log)         shift; cmd_log "$@" ;;
+  rm)          shift; cmd_rm "$@" ;;
+  hook)        shift; cmd_hook "$@" ;;
+  setup)       cmd_setup ;;
+  ""|-h|--help|help) usage ;;
+  *)           usage >&2; exit 1 ;;
+esac
