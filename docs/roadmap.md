@@ -16,9 +16,13 @@
 
 ## v1: sandbox for true fire-and-forget
 
-Run each agent in a rootless Podman container: worktree mounted in, no host secrets, scoped credentials only.
-Only then pre-approve everything inside the container, because the container is the boundary.
-Builds on what already works: rootless Podman, SELinux enforcing, GPU passthrough.
+Built: `agent new --sandbox` (see [agent-harness.md](agent-harness.md#sandbox-mode-v1-agent-new---sandbox)).
+
+- [ ] Create the token (`claude setup-token`, `agent token set`) and run one real sandboxed agent end to end,
+      confirming no trust or onboarding dialog appears.
+- [ ] Decide whether `--sandbox` should become the default for unattended work.
+- [ ] Restricted network allowlist (Claude API, GitHub read, package registries) via a filtering proxy.
+- [ ] Pin the image's Claude Code version instead of `latest`.
 
 ## Later
 

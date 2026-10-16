@@ -1,0 +1,9 @@
+{
+  "skipDangerousModePermissionPrompt": true,
+  "hooks": {
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "agent-hook working" }] }],
+    "PostToolUse":      [{ "hooks": [{ "type": "command", "command": "agent-hook working" }] }],
+    "Notification":     [{ "hooks": [{ "type": "command", "command": "agent-hook needs-you" }] }],
+    "Stop":             [{ "hooks": [{ "type": "command", "command": "agent-hook done" }] }]
+  }
+}

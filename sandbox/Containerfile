@@ -1,0 +1,32 @@
+# Sandbox image for unattended Claude Code agents.
+# Holds the toolchain only: no host secrets, no git credentials, no ssh client.
+FROM docker.io/library/node:22-bookworm-slim
+
+ARG CLAUDE_CODE_VERSION=latest
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      git ca-certificates curl jq ripgrep make build-essential \
+      python3 python3-venv python3-pip \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
+
+RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+ && npm cache clean --force
+
+COPY agent-hook /usr/local/bin/agent-hook
+RUN chmod 755 /usr/local/bin/agent-hook
+
+# The image's `node` user is uid 1000; with --userns=keep-id it matches the host user,
+# so files the agent writes in the mounted clone belong to you.
+COPY --chown=node:node claude-settings.json /home/node/.claude/settings.json
+COPY --chown=node:node claude.json /home/node/.claude.json
+
+USER node
+WORKDIR /work
+ENV HOME=/home/node \
+    DISABLE_AUTOUPDATER=1 \
+    AGENT_STATE_DIR=/agent-state
+
+CMD ["claude"]
