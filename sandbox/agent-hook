@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# In-container Claude Code hook: record status and events where the host can read them.
+# Usage: agent-hook <working|needs-you|done>
+set -u
+event="${1:?usage: agent-hook <event>}"
+dir="${AGENT_STATE_DIR:-/agent-state}"
+name="${AGENT_NAME:-agent}"
+[[ -d "$dir" ]] || exit 0
+
+msg=""
+if [[ "$event" == needs-you ]]; then
+  payload="$(cat || true)"
+  msg="$(printf '%s' "$payload" | jq -r '.message // empty' 2>/dev/null || true)"
+  # Claude's idle reminder arrives as a Notification; don't let it mask "done".
+  if [[ "$msg" == *"waiting for your input"* ]]; then exit 0; fi
+fi
+
+printf '%s %s\n' "$event" "$(date +%s)" > "$dir/status"
+if [[ "$event" != working ]]; then
+  printf '%s %-14s %-10s %s\n' "$(date '+%F %T')" "$name" "$event" "$msg" >> "$dir/events"
+fi

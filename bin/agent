@@ -13,6 +13,15 @@ MEM_MAX="${AGENT_MEM_MAX:-8G}"
 CPU_QUOTA="${AGENT_CPU_QUOTA:-800%}"
 BIN="$HOME/.local/bin/agent"
 
+# Sandbox (--sandbox) settings.
+IMAGE="${AGENT_IMAGE:-isengard-agent}"
+TOKEN_SECRET="${AGENT_TOKEN_SECRET:-claude-oauth-token}"
+SANDBOX_CMD="${AGENT_SANDBOX_CMD:-claude --dangerously-skip-permissions}"
+SANDBOX_MEM="${AGENT_SANDBOX_MEM:-8g}"
+SANDBOX_CPUS="${AGENT_SANDBOX_CPUS:-8}"
+SB_FLAGS=(--userns=keep-id --cap-drop=ALL --security-opt=no-new-privileges
+          --memory="$SANDBOX_MEM" --cpus="$SANDBOX_CPUS" --pids-limit=2048 --tz=local)
+
 die() { echo "agent: $*" >&2; exit 1; }
 now() { date +%s; }
 sess() { echo "agent-$1"; }
@@ -21,18 +30,25 @@ usage() {
   cat <<'EOF'
 usage: agent <command>
 
-  new <repo> <name> [task...]   worktree + tmux session + claude (task = first prompt)
+  new [--sandbox] <repo> <name> [task...]
+                                worktree + tmux session + claude (task = first prompt).
+                                --sandbox: run in a Podman container with its own clone,
+                                no permission prompts, no GitHub credentials (marked [sb])
                                 <repo>: owner/name (cloned with gh), a git URL, a
                                 name under ~/agents/repos, or a path to a local repo
   ls                            all agents: status, age, last output line
   peek <name> [lines]           print the agent's recent terminal output
   attach <name>                 attach to its tmux session (detach: Ctrl-b d)
   diff <name>                   commits and changes on the agent's branch
+  push <name>                   push the agent's branch (host GitHub login)
+  pr <name> [gh args]           push, then open a PR against the default branch
   log [n]                       recent events (needs-you / done)
-  rm <name> [--force]           stop the agent, remove its worktree (branch is kept)
+  rm <name> [--force]           stop the agent, remove its worktree/clone (branch is kept)
   setup                         create ~/agents, default allowlist, install hooks
+  image build                   build the sandbox image
+  token set|status|rm           manage the Claude token the sandbox uses
 
-statuses: working | needs-you | done | exited | gone
+statuses: working | needs-you | done | exited | gone | OFF-BRANCH
 EOF
 }
 
@@ -92,8 +108,93 @@ is_protected_branch() {
   [[ "$2" == main || "$2" == master || "$2" == "$(default_branch "$1")" ]]
 }
 
+is_sandbox() { [[ "${MODE:-}" == sandbox ]]; }
+
+# Status file for an agent: sandboxed agents write into their own mounted state dir.
+status_file() { if is_sandbox; then echo "$STATE/$1.d/status"; else echo "$STATE/$1.status"; fi; }
+
+# The host never runs git inside an agent-controlled directory (repo config can run commands).
+# Anything that needs git in a sandbox clone runs in a throwaway container: no network,
+# nothing mounted but the clone. SELinux labeling is off for these short-lived helpers so
+# they can read a clone that a running agent container holds under a private label.
+sb_git() {
+  podman run --rm --network=none --security-opt=label=disable "${SB_FLAGS[@]}" \
+    -v "$WORKTREE:/work" "$IMAGE" git "$@"
+}
+
+# Bring the agent's commits into the host repo as refs/heads/<branch>, via a git bundle
+# (plain data, so nothing from the clone is executed on the host).
+sb_pull() {
+  local name="$1" dir
+  dir="$STATE/$name.d"
+  rm -f "$dir/out.bundle"
+  if ! podman run --rm --network=none --security-opt=label=disable "${SB_FLAGS[@]}" \
+         -v "$WORKTREE:/work" -v "$dir:/out" "$IMAGE" \
+         git bundle create /out/out.bundle "$BRANCH" "^$BASE_SHA" >/dev/null 2>&1; then
+    echo "no commits on $BRANCH yet" >&2
+    return 1
+  fi
+  git -C "$REPO" -c fetch.fsckObjects=true fetch --quiet "$dir/out.bundle" "+refs/heads/$BRANCH:refs/heads/$BRANCH"
+  rm -f "$dir/out.bundle"
+}
+
+new_sandbox() {
+  local repo="$1" repobase="$2" name="$3" branch="$4" base="$5" task="$6"
+  local clone="$WORK/$repobase-$name" dir="$STATE/$name.d" sha head url
+  command -v podman >/dev/null || die "podman not found"
+  podman image exists "$IMAGE" || die "image '$IMAGE' not found (run: agent image build)"
+  podman secret exists "$TOKEN_SECRET" || die "secret '$TOKEN_SECRET' not found (run: agent token set)"
+  [[ ! -e "$clone" ]] || die "$clone already exists"
+
+  # The branch is created in the host repo at the base commit (or reused), so the sandbox gets
+  # a private single-branch clone of it; its work comes back later through a bundle.
+  sha="$(git -C "$repo" rev-parse "$base^{commit}")"
+  git -C "$repo" show-ref --verify --quiet "refs/heads/$branch" || git -C "$repo" branch --no-track "$branch" "$sha"
+  git -c core.hooksPath=/dev/null clone -q --no-hardlinks --single-branch --branch "$branch" "$repo" "$clone"
+  head="$(git -C "$clone" rev-parse --abbrev-ref HEAD)"
+  if [[ "$head" != "$branch" ]] || is_protected_branch "$repo" "$head"; then
+    rm -rf "$clone"
+    die "refusing to start on '$head': agents must work on their own branch ($branch)"
+  fi
+  # Point origin at the real upstream (it has no credentials inside the sandbox) or drop it.
+  if url="$(git -C "$repo" remote get-url origin 2>/dev/null)"; then
+    git -C "$clone" remote set-url origin "$url"
+    git -C "$clone" branch --unset-upstream "$branch" 2>/dev/null || true
+  else
+    git -C "$clone" remote remove origin
+  fi
+
+  mkdir -p "$dir"
+  {
+    printf 'MODE=sandbox\n'
+    printf 'REPO=%q\n' "$repo"
+    printf 'BRANCH=%q\n' "$branch"
+    printf 'BASE=%q\n' "$base"
+    printf 'BASE_SHA=%q\n' "$sha"
+    printf 'WORKTREE=%q\n' "$clone"
+    printf 'STARTED=%q\n' "$(now)"
+  } > "$STATE/$name.env"
+  if [[ -n "$task" ]]; then printf 'working %s\n' "$(now)" > "$dir/status"; else printf 'done %s\n' "$(now)" > "$dir/status"; fi
+
+  local -a args=(podman run -it --rm --name "$(sess "$name")" "${SB_FLAGS[@]}"
+    -v "$clone:/work:Z" -v "$dir:/agent-state:Z"
+    --secret "$TOKEN_SECRET,type=env,target=CLAUDE_CODE_OAUTH_TOKEN"
+    -e "AGENT_NAME=$name" "$IMAGE")
+  # shellcheck disable=SC2206
+  args+=($SANDBOX_CMD)
+  if [[ -n "$task" ]]; then args+=("$task"); fi
+  tmux new-session -d -s "$(sess "$name")" -c "$clone" "$(printf '%q ' "${args[@]}")"
+  tmux set-option -t "$(sess "$name")" remain-on-exit on >/dev/null
+  echo "started '$name' in a sandbox on $branch (base $base)"
+  echo "  clone:    $clone"
+  echo "  watch:    agent attach $name   |   agent peek $name"
+  echo "  when done: agent diff $name   |   agent pr $name"
+}
+
 cmd_new() {
-  [[ $# -ge 2 ]] || die "usage: agent new <repo> <name> [task...]"
+  local sandbox=0
+  if [[ "${1:-}" == --sandbox || "${1:-}" == -s ]]; then sandbox=1; shift; fi
+  [[ $# -ge 2 ]] || die "usage: agent new [--sandbox] <repo> <name> [task...]"
   local spec="$1" name="$2"
   shift 2
   local task="$*"
@@ -113,6 +214,10 @@ cmd_new() {
   # then verify what git actually checked out.
   if is_protected_branch "$repo" "$branch"; then
     die "refusing: '$branch' is a protected branch; agents must work on their own branch"
+  fi
+  if [[ "$sandbox" == 1 ]]; then
+    new_sandbox "$repo" "$repobase" "$name" "$branch" "$base" "$task"
+    return
   fi
   if git -C "$repo" show-ref --verify --quiet "refs/heads/$branch"; then
     git -C "$repo" worktree add "$wt" "$branch" >&2
@@ -175,15 +280,21 @@ cmd_ls() {
       s="$(sess "$name")"; status=gone; age=""; last=""
       if tmux has-session -t "$s" 2>/dev/null; then
         status=working; ts="$(now)"
-        [[ -f "$STATE/$name.status" ]] && read -r status ts < "$STATE/$name.status"
+        sf="$(status_file "$name")"
+        [[ -f "$sf" ]] && read -r status ts < "$sf"
         [[ "$(tmux display-message -p -t "$s" '#{pane_dead}')" == 1 ]] && status=exited
         age="$(human_age $(( $(now) - ts )))"
         last="$(last_line "$s")"
       fi
       # Flag an agent whose worktree has been moved off its own branch (e.g. onto main).
-      cur="$(git -C "$WORKTREE" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
-      if [[ -n "$cur" && "$cur" != "$BRANCH" ]]; then status=OFF-BRANCH; last="on '$cur', expected '$BRANCH'"; fi
-      printf '%-14s %-16s %-10s %-5s %s\n' "$name" "$(basename "$REPO")" "$status" "$age" "$last"
+      # Not for sandboxes: the host doesn't run git in an agent-controlled clone.
+      if ! is_sandbox; then
+        cur="$(git -C "$WORKTREE" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+        if [[ -n "$cur" && "$cur" != "$BRANCH" ]]; then status=OFF-BRANCH; last="on '$cur', expected '$BRANCH'"; fi
+      fi
+      repo_col="$(basename "$REPO")"
+      if is_sandbox; then repo_col+="[sb]"; fi
+      printf '%-14s %-16s %-10s %-5s %s\n' "$name" "$repo_col" "$status" "$age" "$last"
     )
   done
 }
@@ -207,6 +318,15 @@ cmd_attach() {
 cmd_diff() {
   local name="${1:?usage: agent diff <name>}"
   load "$name"
+  if is_sandbox; then
+    sb_pull "$name" || true
+    echo "== $BRANCH (base: $BASE) [sandbox clone: $WORKTREE]"
+    git -C "$REPO" log --oneline "$BASE_SHA..$BRANCH" || true
+    git -C "$REPO" diff --stat "$BASE_SHA" "$BRANCH" || true
+    echo "-- uncommitted in the sandbox clone:"
+    sb_git status -sb || true
+    return
+  fi
   echo "== $BRANCH (base: $BASE) in $WORKTREE"
   git -C "$WORKTREE" log --oneline "$BASE..HEAD" || true
   git -C "$WORKTREE" status -sb
@@ -214,14 +334,30 @@ cmd_diff() {
 }
 
 cmd_log() {
-  [[ -f "$EVENTS" ]] || { echo "no events yet"; return; }
-  tail -n "${1:-20}" "$EVENTS"
+  shopt -s nullglob
+  local f files=()
+  for f in "$EVENTS" "$STATE"/*.d/events; do [[ -f "$f" ]] && files+=("$f"); done
+  (( ${#files[@]} > 0 )) || { echo "no events yet"; return; }
+  cat "${files[@]}" | sort | tail -n "${1:-20}"
 }
 
 cmd_rm() {
   local name="${1:?usage: agent rm <name> [--force]}" force="${2:-}"
   [[ -z "$force" || "$force" == "--force" ]] || die "unknown option: $force"
   load "$name"
+  if is_sandbox; then
+    if [[ -d "$WORKTREE" && -z "$force" ]]; then
+      [[ -z "$(sb_git status --porcelain)" ]] \
+        || die "sandbox clone has uncommitted changes (agent rm $name --force to discard)"
+    fi
+    sb_pull "$name" || true     # keep committed work on the host branch
+    tmux kill-session -t "$(sess "$name")" 2>/dev/null || true
+    podman rm -f "$(sess "$name")" >/dev/null 2>&1 || true
+    rm -rf "$WORKTREE" "$STATE/$name.d"
+    rm -f "$STATE/$name.env"
+    echo "removed '$name'; branch $BRANCH kept in $REPO (delete: git -C $REPO branch -D $BRANCH)"
+    return
+  fi
   if [[ -d "$WORKTREE" && -z "$force" ]]; then
     [[ -z "$(git -C "$WORKTREE" status --porcelain)" ]] \
       || die "worktree has uncommitted changes (agent rm $name --force to discard)"
@@ -230,6 +366,55 @@ cmd_rm() {
   if [[ -d "$WORKTREE" ]]; then git -C "$REPO" worktree remove ${force:+--force} "$WORKTREE"; fi
   rm -f "$STATE/$name.env" "$STATE/$name.status"
   echo "removed '$name'; branch $BRANCH kept (delete: git -C $REPO branch -D $BRANCH)"
+}
+
+# Push the agent's branch (and only that branch) using the host's GitHub login.
+# GitHub credentials never enter a sandbox; this always runs on the host.
+cmd_push() {
+  local name="${1:?usage: agent push <name>}"
+  load "$name"
+  if is_sandbox; then
+    sb_pull "$name" || die "nothing to push: no commits on $BRANCH"
+  fi
+  is_protected_branch "$REPO" "$BRANCH" && die "refusing to push protected branch '$BRANCH'"
+  git -C "$REPO" remote get-url origin >/dev/null 2>&1 || die "repo has no origin remote"
+  git -C "$REPO" -c credential.helper= -c 'credential.helper=!gh auth git-credential' \
+    push -u origin "$BRANCH:$BRANCH"
+}
+
+# Push the branch and open a PR against the default branch. Extra args go to `gh pr create`.
+cmd_pr() {
+  local name="${1:?usage: agent pr <name> [gh pr create args]}"
+  shift
+  cmd_push "$name"
+  (cd "$REPO" && gh pr create --head "$BRANCH" --base "$(default_branch "$REPO")" --fill "$@")
+}
+
+cmd_image() {
+  case "${1:-}" in
+    build)
+      [[ -f "$AGENTS_HOME/sandbox/Containerfile" ]] || die "no Containerfile in $AGENTS_HOME/sandbox (run scripts/install-agent.sh from the repo)"
+      podman build -t "$IMAGE" -f "$AGENTS_HOME/sandbox/Containerfile" "$AGENTS_HOME/sandbox" ;;
+    *) die "usage: agent image build" ;;
+  esac
+}
+
+# The Claude token the sandbox uses lives in a Podman secret, never on a command line.
+cmd_token() {
+  local t
+  case "${1:-}" in
+    set)
+      echo "Run 'claude setup-token' (needs a Claude subscription), then paste the token here." >&2
+      read -rsp "token: " t; echo >&2
+      [[ -n "$t" ]] || die "empty token"
+      printf '%s' "$t" | podman secret create --replace "$TOKEN_SECRET" - >/dev/null
+      echo "stored as podman secret '$TOKEN_SECRET'" ;;
+    status)
+      if podman secret exists "$TOKEN_SECRET"; then echo "secret '$TOKEN_SECRET': present"; else echo "secret '$TOKEN_SECRET': missing"; fi ;;
+    rm)
+      podman secret rm "$TOKEN_SECRET" ;;
+    *) die "usage: agent token set|status|rm" ;;
+  esac
 }
 
 # Called by Claude Code hooks: agent hook <working|needs-you|done>
@@ -316,6 +501,10 @@ case "${1:-}" in
   diff)        shift; cmd_diff "$@" ;;
   log)         shift; cmd_log "$@" ;;
   rm)          shift; cmd_rm "$@" ;;
+  push)        shift; cmd_push "$@" ;;
+  pr)          shift; cmd_pr "$@" ;;
+  image)       shift; cmd_image "$@" ;;
+  token)       shift; cmd_token "$@" ;;
   hook)        shift; cmd_hook "$@" ;;
   setup)       cmd_setup ;;
   ""|-h|--help|help) usage ;;
