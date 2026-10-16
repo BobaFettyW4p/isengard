@@ -116,6 +116,14 @@ directory at `/agent-state` (status and events), and the Claude token as an envi
 any host config. It runs as your uid (`--userns=keep-id`) with all capabilities dropped,
 `no-new-privileges`, and limits of 8 GB RAM, 8 CPUs and 2048 processes (`AGENT_SANDBOX_MEM`, `AGENT_SANDBOX_CPUS`).
 
+**Commit identity.** The container has no git config of its own, so without one every `git commit` inside it fails
+with "Author identity unknown" (an early run hit exactly this: the agent staged its file, never committed, and still
+reported done). `agent new --sandbox` therefore passes `GIT_AUTHOR_*` and `GIT_COMMITTER_*` into the container. By
+default that is the host's `git config --global user.name` plus your GitHub noreply address
+(`<id>+<login>@users.noreply.github.com`, looked up with `gh api user`), so commits link to your account and no
+personal email lands in a public repo. Override with `AGENT_GIT_NAME` and `AGENT_GIT_EMAIL`. If it can't work out an
+identity it refuses to start rather than launching an agent that can't commit.
+
 **Getting work out.** The host never runs git inside an agent-controlled directory, because repo-local config
 (`core.fsmonitor`, filters, hooks) can execute commands. Instead:
 
