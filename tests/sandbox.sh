@@ -9,6 +9,8 @@ T="$(mktemp -d)"
 export AGENTS_HOME="$T/agents"
 export AGENT_TOKEN_SECRET="isengard-test-token-$$"
 export AGENT_SANDBOX_CMD="bash -c"
+# The fake agent gets no git identity of its own: it must come from the sandbox setup.
+export AGENT_GIT_NAME="Test Agent" AGENT_GIT_EMAIL="test-agent@example.invalid"
 A="$AGENT_BIN"
 NAME=sbtest
 IMAGE="${AGENT_IMAGE:-isengard-agent}"
@@ -51,7 +53,6 @@ ORIG_MAIN="$(git -C "$T/repo" rev-parse main)"
 # The "agent": records what it can see, commits, tampers with a local ref, then
 # walks through needs-you and done via the in-container hook.
 read -r -d '' SCRIPT <<'EOF' || true
-export GIT_AUTHOR_NAME=agent GIT_AUTHOR_EMAIL=a@a GIT_COMMITTER_NAME=agent GIT_COMMITTER_EMAIL=a@a
 agent-hook working
 {
   id -u
@@ -104,6 +105,9 @@ d="$("$A" diff "$NAME")"
 grep -q "agent work" <<<"$d" || fail "diff missing commit: $d"
 grep -q "out.txt" <<<"$d"    || fail "diff missing file: $d"
 [[ "$(git -C "$T/repo" log -1 --format=%s "agent/$NAME")" == "agent work" ]] || fail "work not pulled into host branch"
+want_id="Test Agent <test-agent@example.invalid>"
+[[ "$(git -C "$T/repo" log -1 --format='%an <%ae>' "agent/$NAME")" == "$want_id" ]] || fail "commit author is not the sandbox identity"
+[[ "$(git -C "$T/repo" log -1 --format='%cn <%ce>' "agent/$NAME")" == "$want_id" ]] || fail "committer is not the sandbox identity"
 [[ "$(git -C "$T/repo" rev-parse main)" == "$ORIG_MAIN" ]] || fail "host main was changed"
 pass "work pulled back as host branch; host main untouched despite tampering in the clone"
 

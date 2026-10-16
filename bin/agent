@@ -138,12 +138,31 @@ sb_pull() {
   rm -f "$dir/out.bundle"
 }
 
+# Git identity for commits made inside a sandbox, printed as "name<TAB>email". The container has
+# no git config of its own, so without this every `git commit` fails with "Author identity unknown".
+# Default: the host's git name and the GitHub noreply address of the logged-in gh account, so
+# commits link to the account and no personal email lands in a public repo.
+sb_git_identity() {
+  local name="${AGENT_GIT_NAME:-}" email="${AGENT_GIT_EMAIL:-}" id="" login=""
+  if [[ -z "$name" ]]; then name="$(git config --global user.name 2>/dev/null || true)"; fi
+  if [[ -z "$name" || -z "$email" ]]; then
+    read -r id login < <(gh api user --jq '"\(.id) \(.login)"' 2>/dev/null) || true
+    if [[ -z "$name" ]]; then name="$login"; fi
+    if [[ -z "$email" && -n "$id" ]]; then email="$id+$login@users.noreply.github.com"; fi
+  fi
+  [[ -n "$name" && -n "$email" ]] || die "can't work out a git identity for the sandbox; set AGENT_GIT_NAME and AGENT_GIT_EMAIL"
+  printf '%s\t%s\n' "$name" "$email"
+}
+
 new_sandbox() {
   local repo="$1" repobase="$2" name="$3" branch="$4" base="$5" task="$6"
-  local clone="$WORK/$repobase-$name" dir="$STATE/$name.d" sha head url
+  local clone="$WORK/$repobase-$name" dir="$STATE/$name.d" sha head url ident gname gemail
   command -v podman >/dev/null || die "podman not found"
   podman image exists "$IMAGE" || die "image '$IMAGE' not found (run: agent image build)"
   podman secret exists "$TOKEN_SECRET" || die "secret '$TOKEN_SECRET' not found (run: agent token set)"
+  ident="$(sb_git_identity)"
+  gname="${ident%%$'\t'*}"
+  gemail="${ident##*$'\t'}"
   [[ ! -e "$clone" ]] || die "$clone already exists"
 
   # The branch is created in the host repo at the base commit (or reused), so the sandbox gets
@@ -179,7 +198,10 @@ new_sandbox() {
   local -a args=(podman run -it --rm --name "$(sess "$name")" "${SB_FLAGS[@]}"
     -v "$clone:/work:Z" -v "$dir:/agent-state:Z"
     --secret "$TOKEN_SECRET,type=env,target=CLAUDE_CODE_OAUTH_TOKEN"
-    -e "AGENT_NAME=$name" "$IMAGE")
+    -e "AGENT_NAME=$name"
+    -e "GIT_AUTHOR_NAME=$gname" -e "GIT_AUTHOR_EMAIL=$gemail"
+    -e "GIT_COMMITTER_NAME=$gname" -e "GIT_COMMITTER_EMAIL=$gemail"
+    "$IMAGE")
   # shellcheck disable=SC2206
   args+=($SANDBOX_CMD)
   if [[ -n "$task" ]]; then args+=("$task"); fi
