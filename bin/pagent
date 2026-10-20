@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# pagent: run from your laptop. Compose a long prompt in $EDITOR, then start an
+# agent on the server with `agent new`. Everything else is passed through to `agent`.
+#
+#   pagent [-s] [-m "prompt"] [--dry-run] [repo] [name]   start an agent
+#   pagent ls | peek | attach | diff | push | pr | log | rm ...   same as `agent <cmd>` on the server
+#
+# The prompt comes from -m, piped stdin, or $VISUAL/$EDITOR (like `git commit`).
+# -s runs the agent in the sandbox (agent new --sandbox).
+# repo defaults to the current directory's GitHub remote (owner/name).
+# name defaults to <repo>-<HHMMSS>.
+# A copy of every prompt is kept in ~/.pagent/prompts.
+set -euo pipefail
+
+HOST=${PAGENT_HOST:-perseus}
+LOCAL=${PAGENT_DIR:-$HOME/.pagent}
+# ssh re-splits its arguments through the remote shell, so quote everything with %q.
+REMOTE_ENV='PATH="$HOME/.local/bin:$PATH"'
+
+usage() { sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+
+remote() {  # remote <tty|notty> <script> [args...]: run `bash -c script _ args` on the host
+  local tty=$1 script=$2 cmd
+  shift 2
+  printf -v cmd 'bash -c %q _' "$REMOTE_ENV; $script"
+  for a in "$@"; do printf -v cmd '%s %q' "$cmd" "$a"; done
+  if [ "$tty" = tty ]; then ssh -t "$HOST" "$cmd"; else ssh "$HOST" "$cmd"; fi
+}
+
+case "${1:-}" in
+  ls|peek|attach|diff|push|pr|log|rm|setup|token|image) remote tty 'exec agent "$@"' "$@"; exit 0 ;;
+  -h|--help|help) usage 0 ;;
+esac
+
+sandbox=0 msg="" dry=0
+while [ $# -gt 0 ]; do
+  case $1 in
+    -s|--sandbox) sandbox=1; shift ;;
+    -m) msg=${2:?-m needs a prompt}; shift 2 ;;
+    --dry-run) dry=1; shift ;;
+    -h|--help) usage 0 ;;
+    --) shift; break ;;
+    -*) echo "pagent: unknown option $1" >&2; usage 1 ;;
+    *) break ;;
+  esac
+done
+
+repo=${1:-}
+if [ -z "$repo" ]; then
+  url=$(git remote get-url origin 2>/dev/null) || { echo "pagent: no repo given and no git remote here" >&2; exit 1; }
+  repo=$(printf '%s' "$url" | sed -E 's#(git@github.com:|https://github.com/)##; s#\.git$##')
+fi
+name=${2:-$(basename "$repo" | tr 'A-Z._' 'a-z--')-$(date +%H%M%S)}
+
+mkdir -p "$LOCAL/prompts"
+pf="$LOCAL/prompts/$(date +%Y%m%d-%H%M%S)-$name.md"
+if [ -n "$msg" ]; then
+  printf '%s\n' "$msg" > "$pf"
+elif [ ! -t 0 ]; then
+  cat > "$pf"
+else
+  ed=${VISUAL:-${EDITOR:-vi}}
+  case "$ed" in code*|cursor*|subl*|windsurf*) ed="$ed --wait" ;; esac
+  $ed "$pf"
+fi
+if [ -z "$(tr -d '[:space:]' < "$pf" 2>/dev/null)" ]; then
+  echo "pagent: empty prompt, aborting" >&2; rm -f "$pf"; exit 1
+fi
+
+args=(new)
+[ "$sandbox" = 1 ] && args+=(--sandbox)
+args+=("$repo" "$name")
+
+if [ "$dry" = 1 ]; then
+  echo "would run on $HOST: agent ${args[*]} <prompt from $pf, $(wc -c < "$pf" | tr -d ' ') bytes>"
+  exit 0
+fi
+
+# The prompt travels on stdin, so its length and quoting never matter.
+remote notty 'exec agent "$@" "$(cat)"' "${args[@]}" < "$pf"
+echo "attach: pagent attach $name    peek: pagent peek $name"

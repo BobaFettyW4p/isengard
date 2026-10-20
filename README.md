@@ -10,6 +10,7 @@ It is reached over Tailscale and runs Claude Code agents, each in its own git wo
 | Path | What it is |
 |---|---|
 | [`bin/agent`](bin/agent) | The agent manager (bash). One worktree + tmux session per agent. |
+| [`bin/pagent`](bin/pagent) | Laptop-side front-end: write the prompt in `$EDITOR`, start `agent new` on the server over ssh. |
 | [`sandbox/`](sandbox) | Image sources for sandboxed agents (Containerfile, in-container hook, baked Claude config). |
 | [`scripts/install-agent.sh`](scripts/install-agent.sh) | Installs `agent` to `~/.local/bin`, copies the sandbox sources, runs first-time setup. |
 | [`tests/lifecycle.sh`](tests/lifecycle.sh) | End-to-end test of `agent` using a fake agent (no API usage). |
@@ -36,6 +37,13 @@ agent rm fix-bug                  # stop it, remove the worktree (branch kept)
 # unattended, in a container with no prompts and no GitHub credentials:
 agent new --sandbox owner/repo fix-bug2 "Fix it"
 agent pr fix-bug2                 # pull its work out, push the branch, open a PR
+```
+
+From your laptop, `bin/pagent` composes the prompt in your editor instead of a command-line argument:
+
+```bash
+pagent [-s] [-m "prompt"] [repo] [name]   # prompt from $EDITOR, stdin, or -m; -s = --sandbox
+pagent ls | peek | attach | pr | rm ...   # passed through to `agent` on the server
 ```
 
 Run the self-tests any time with `tests/lifecycle.sh` and `tests/sandbox.sh`.
