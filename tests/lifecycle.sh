@@ -110,4 +110,21 @@ tmux has-session -t agent-guardtest 2>/dev/null && fail "guard left a tmux sessi
 git -C "$T/repo" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
 pass "agent refuses to start on the default branch"
 
+# Task from stdin ("-"): arrives intact however long or oddly quoted; empty is refused.
+cat > "$T/argv.sh" <<EOF
+#!/usr/bin/env bash
+printf '%s' "\$1" > "$T/argv.out"
+sleep 60
+EOF
+chmod +x "$T/argv.sh"
+prompt=$'multi-line "quoted" $HOME `ticks` \'single\'\nsecond line'
+printf '%s\n' "$prompt" | AGENT_CMD="$T/argv.sh" "$A" new "$T/repo" stdintest - >/dev/null 2>&1 || fail "agent new with stdin task"
+for i in $(seq 1 30); do [[ -s "$T/argv.out" ]] && break; sleep 0.5; done
+[[ "$(cat "$T/argv.out")" == "$prompt" ]] || fail "stdin task mangled: $(cat "$T/argv.out")"
+"$A" rm stdintest --force >/dev/null 2>&1 || true
+if out="$(printf '  \n' | AGENT_CMD="$T/argv.sh" "$A" new "$T/repo" emptytest - 2>&1)"; then fail "empty stdin task accepted"; fi
+grep -q "empty task" <<<"$out" || fail "empty-task message missing: $out"
+[[ ! -e "$AGENTS_HOME/state/emptytest.env" ]] || fail "empty task left state behind"
+pass "agent new - reads the task from stdin"
+
 echo "all passed"
