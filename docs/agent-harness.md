@@ -19,6 +19,7 @@ agent log [n]                       recent needs-you / done events
 agent rm <name> [--force]           stop it, remove the worktree, keep the branch
 agent clean [-n] [name...]          after a merge: remove agents whose PR is merged and delete their branch
 agent setup                         create ~/agents, default allowlist, install hooks and pstack
+agent update [-n]                   sync the installed agent with the remote (-n: just check)
 agent image build                   build the sandbox image
 agent token set|status|rm           manage the Claude token the sandbox uses
 ```
