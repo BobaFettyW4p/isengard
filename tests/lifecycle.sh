@@ -188,4 +188,40 @@ git -C "$T/repo" show-ref --verify --quiet refs/heads/agent/cleana && fail "clea
 "$A" rm cleanb --force >/dev/null 2>&1 || true
 pass "clean removes merged agents and their branch, keeps the rest"
 
+# update: an install records its commit and origin; 'agent update' syncs to the remote's branch.
+git init -q --bare "$T/self-origin.git"
+git clone -q "$T/self-origin.git" "$T/self-src" 2>/dev/null
+(
+  cd "$T/self-src"
+  git checkout -q -b main
+  mkdir -p bin scripts sandbox
+  cp "$AGENT_BIN" bin/agent
+  cp "$(dirname "$AGENT_BIN")/../scripts/install-agent.sh" scripts/
+  echo one > sandbox/Containerfile
+  git add . && git -c user.name=t -c user.email=t@t commit -qm v1
+  git push -q origin main
+)
+AGENT_NO_PSTACK=1 AGENT_NO_SCOPE=1 bash "$T/self-src/scripts/install-agent.sh" >/dev/null 2>&1 || fail "install from clone"
+U="$HOME/.local/bin/agent"
+[[ "$(cat "$AGENTS_HOME/version")" == "$(git -C "$T/self-src" rev-parse HEAD)" ]] || fail "install did not record the version"
+out="$("$U" update 2>&1)" || fail "update (current): $out"
+grep -q "up to date" <<<"$out" || fail "update should report up to date: $out"
+(
+  cd "$T/self-src"
+  echo '# v2' >> bin/agent
+  echo two > sandbox/Containerfile
+  git -c user.name=t -c user.email=t@t commit -qam v2
+  git push -q origin main
+)
+out="$("$U" update -n 2>&1)" || fail "update -n: $out"
+grep -q "update available" <<<"$out" || fail "update -n should report an update: $out"
+grep -q '^# v2$' "$U" && fail "update -n changed the install"
+out="$("$U" update 2>&1)" || fail "update: $out"
+grep -q "agent image build" <<<"$out" || fail "update should flag sandbox changes: $out"
+tail -1 "$U" | grep -q '^# v2$' || fail "update did not install the new agent"
+[[ "$(cat "$AGENTS_HOME/version")" == "$(git -C "$T/self-src" rev-parse HEAD)" ]] || fail "update did not record the new version"
+[[ "$(cat "$AGENTS_HOME/sandbox/Containerfile")" == two ]] || fail "update did not refresh sandbox sources"
+"$U" update 2>&1 | grep -q "up to date" || fail "second update should be a no-op"
+pass "update syncs the install with the remote"
+
 echo "all passed"

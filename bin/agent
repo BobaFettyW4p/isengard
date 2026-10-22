@@ -12,6 +12,8 @@ AGENT_CMD="${AGENT_CMD:-claude}"
 MEM_MAX="${AGENT_MEM_MAX:-8G}"
 CPU_QUOTA="${AGENT_CPU_QUOTA:-800%}"
 BIN="$HOME/.local/bin/agent"
+UPDATE_REPO="${AGENT_UPDATE_REPO:-}"      # default: the origin recorded at install time
+UPDATE_BRANCH="${AGENT_UPDATE_BRANCH:-main}"
 PSTACK_MARKETPLACE="${AGENT_PSTACK_MARKETPLACE:-cursor/plugins}"
 PSTACK_PLUGIN="${AGENT_PSTACK_PLUGIN:-pstack@cursor-plugins}"
 
@@ -51,6 +53,8 @@ usage: agent <command>
   clean [-n] [name...]          remove agents whose PR is merged (and delete their branch);
                                 keeps the rest. No names = every agent. -n = dry run
   setup                         create ~/agents, default allowlist, install hooks and pstack
+  update [-n]                   sync this install with the latest agent on the remote
+                                (-n: only report whether an update is available)
   image build                   build the sandbox image
   token set|status|rm           manage the Claude token the sandbox uses
 
@@ -565,6 +569,43 @@ cmd_setup() {
   [[ "${AGENT_NO_PSTACK:-0}" == 1 ]] || install_pstack
 }
 
+# Sync the installed agent with the remote. Works from a private clone in ~/agents/self (never your
+# own checkout): fetch the branch, then re-run that revision's installer, which also refreshes the
+# sandbox sources and hooks. ~/agents/version holds the installed commit.
+cmd_update() {
+  local check=0 self="$AGENTS_HOME/self" url cur new
+  case "${1:-}" in
+    "") ;;
+    -n|--check) check=1 ;;
+    *) die "usage: agent update [-n]" ;;
+  esac
+  command -v git >/dev/null || die "git not found"
+  url="${UPDATE_REPO:-$(cat "$AGENTS_HOME/source" 2>/dev/null || true)}"
+  [[ -n "$url" ]] || die "no remote recorded; set AGENT_UPDATE_REPO or re-run scripts/install-agent.sh from a clone with an origin"
+  cur="$(cat "$AGENTS_HOME/version" 2>/dev/null || true)"
+  mkdir -p "$AGENTS_HOME"
+  if [[ ! -d "$self/.git" ]]; then
+    rm -rf "$self"
+    git clone --quiet --no-checkout "$url" "$self" || die "can't clone $url"
+  fi
+  git -C "$self" remote set-url origin "$url"
+  git -C "$self" fetch --quiet origin "$UPDATE_BRANCH" || die "can't fetch $UPDATE_BRANCH from $url"
+  new="$(git -C "$self" rev-parse FETCH_HEAD)"
+  if [[ "$cur" == "$new" ]]; then echo "agent is up to date (${new:0:7})"; return; fi
+  echo "installed: ${cur:+${cur:0:7}}${cur:-unknown}"
+  echo "remote:    ${new:0:7} ($UPDATE_BRANCH)"
+  if (( check )); then echo "update available; run 'agent update'"; return; fi
+  git -C "$self" checkout --quiet --force --detach "$new"
+  if [[ -n "$cur" ]] && git -C "$self" cat-file -e "$cur^{commit}" 2>/dev/null; then
+    git -C "$self" log --oneline "$cur..$new" | head -20
+    if ! git -C "$self" diff --quiet "$cur" "$new" -- sandbox; then
+      echo "sandbox sources changed: run 'agent image build' to rebuild the image"
+    fi
+  fi
+  # exec: the installer replaces this very script.
+  AGENT_NO_PSTACK=1 exec bash "$self/scripts/install-agent.sh"
+}
+
 command -v tmux >/dev/null || die "tmux not found"
 # Remove agents whose work has landed: a merged PR whose head is exactly the branch tip.
 # Anything else (no PR, open PR, commits after the merge, uncommitted changes) is kept.
@@ -615,6 +656,7 @@ case "${1:-}" in
   token)       shift; cmd_token "$@" ;;
   hook)        shift; cmd_hook "$@" ;;
   setup)       cmd_setup ;;
+  update)      shift; cmd_update "$@" ;;
   ""|-h|--help|help) usage ;;
   *)           usage >&2; exit 1 ;;
 esac
