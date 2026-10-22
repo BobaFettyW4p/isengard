@@ -127,4 +127,23 @@ grep -q "empty task" <<<"$out" || fail "empty-task message missing: $out"
 [[ ! -e "$AGENTS_HOME/state/emptytest.env" ]] || fail "empty task left state behind"
 pass "agent new - reads the task from stdin"
 
+# --file: same payload from a file; --edit: from an editor (needs a tty, so run under a pty).
+rm -f "$T/argv.out"
+printf '%s\n' "$prompt" > "$T/prompt.md"
+AGENT_CMD="$T/argv.sh" "$A" new --file "$T/prompt.md" "$T/repo" filetest >/dev/null 2>&1 || fail "agent new --file"
+for i in $(seq 1 30); do [[ -s "$T/argv.out" ]] && break; sleep 0.5; done
+[[ "$(cat "$T/argv.out")" == "$prompt" ]] || fail "--file task mangled: $(cat "$T/argv.out")"
+"$A" rm filetest --force >/dev/null 2>&1 || true
+pass "agent new --file reads the task from a file"
+
+if command -v python3 >/dev/null 2>&1; then
+  rm -f "$T/argv.out"
+  printf '#!/usr/bin/env bash\ncp %q "$1"\n' "$T/prompt.md" > "$T/editor.sh"; chmod +x "$T/editor.sh"
+  EDITOR="$T/editor.sh" AGENT_CMD="$T/argv.sh" python3 -c 'import pty,sys,os; sys.exit(os.waitstatus_to_exitcode(pty.spawn(sys.argv[1:])))' "$A" new --edit "$T/repo" edittest >/dev/null 2>&1 || fail "agent new --edit"
+  for i in $(seq 1 30); do [[ -s "$T/argv.out" ]] && break; sleep 0.5; done
+  [[ "$(cat "$T/argv.out")" == "$prompt" ]] || fail "--edit task mangled: $(cat "$T/argv.out")"
+  "$A" rm edittest --force >/dev/null 2>&1 || true
+  pass "agent new --edit runs the editor and uses its result"
+fi
+
 echo "all passed"

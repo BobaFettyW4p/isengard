@@ -30,9 +30,10 @@ usage() {
   cat <<'EOF'
 usage: agent <command>
 
-  new [--sandbox] <repo> <name> [task... | -]
-                                worktree + tmux session + claude (task = first prompt;
-                                "-" reads the task from stdin, for long or multi-line prompts)
+  new [--sandbox] [--edit | --file <path>] <repo> <name> [task... | -]
+                                worktree + tmux session + claude (task = first prompt).
+                                For long prompts: --edit writes it in $VISUAL/$EDITOR,
+                                --file reads it from a file, "-" reads it from stdin
                                 --sandbox: run in a Podman container with its own clone,
                                 no permission prompts, no GitHub credentials (marked [sb])
                                 <repo>: owner/name (cloned with gh), a git URL, a
@@ -215,15 +216,35 @@ new_sandbox() {
 }
 
 cmd_new() {
-  local sandbox=0
-  if [[ "${1:-}" == --sandbox || "${1:-}" == -s ]]; then sandbox=1; shift; fi
-  [[ $# -ge 2 ]] || die "usage: agent new [--sandbox] <repo> <name> [task... | -]"
+  local sandbox=0 edit=0 file=""
+  while [[ "${1:-}" == -* && "${1:-}" != - ]]; do
+    case "$1" in
+      --sandbox|-s) sandbox=1; shift ;;
+      --edit|-e) edit=1; shift ;;
+      --file|-f) [[ $# -ge 2 ]] || die "$1 needs a path"; file="$2"; shift 2 ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+  [[ $# -ge 2 ]] || die "usage: agent new [--sandbox] [--edit | --file <path>] <repo> <name> [task... | -]"
   local spec="$1" name="$2"
   shift 2
   local task="$*"
   if [[ "$task" == "-" ]]; then
     task="$(cat)"
     [[ -n "${task//[[:space:]]/}" ]] || die "empty task on stdin"
+  elif [[ -n "$file" ]]; then
+    [[ -r "$file" ]] || die "cannot read $file"
+    task="$(cat "$file")"
+    [[ -n "${task//[[:space:]]/}" ]] || die "empty task in $file"
+  elif (( edit )); then
+    [[ -t 0 && -t 1 ]] || die "--edit needs a terminal"
+    local ed="${VISUAL:-${EDITOR:-vi}}" tmp
+    case "$ed" in code*|cursor*|subl*|windsurf*) ed="$ed --wait" ;; esac
+    tmp="$(mktemp "${TMPDIR:-/tmp}/agent-task.XXXXXX.md")"
+    # shellcheck disable=SC2086
+    $ed "$tmp" || { rm -f "$tmp"; die "editor failed"; }
+    task="$(cat "$tmp")"; rm -f "$tmp"
+    [[ -n "${task//[[:space:]]/}" ]] || die "empty task, nothing started"
   fi
   [[ "$name" =~ ^[a-z0-9][a-z0-9-]*$ ]] || die "name must match [a-z0-9-]+"
   [[ ! -e "$STATE/$name.env" ]] || die "agent '$name' already exists"

@@ -6,9 +6,9 @@ leaving it alone are the same thing: attach to look, detach to walk away. 2 to 4
 ## Commands
 
 ```
-agent new [--sandbox] <repo> <name> [task... | -]
-                                    new agent; task becomes the first prompt
-                                    ("-" reads it from stdin, for long or multi-line prompts)
+agent new [--sandbox] [--edit | --file <path>] <repo> <name> [task... | -]
+                                    new agent; task becomes the first prompt. For long prompts:
+                                    --edit opens $VISUAL/$EDITOR, --file reads a file, "-" reads stdin
 agent ls                            status, age and last output line for every agent
 agent peek <name> [lines]           print recent terminal output without attaching
 agent attach <name>                 attach to the tmux session (detach: Ctrl-b d)

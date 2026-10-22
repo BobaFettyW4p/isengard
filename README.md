@@ -38,19 +38,16 @@ agent new --sandbox owner/repo fix-bug2 "Fix it"
 agent pr fix-bug2                 # pull its work out, push the branch, open a PR
 ```
 
-For long prompts, pass `-` as the task and the prompt is read from stdin, so you can write it in any editor on your laptop:
+For long prompts, skip the command-line argument:
 
 ```bash
-ssh perseus agent new --sandbox owner/repo fix-bug - < prompt.md
+agent new --sandbox --edit owner/repo fix-bug      # write the prompt in $VISUAL/$EDITOR
+agent new --sandbox --file prompt.md owner/repo fix-bug
+agent new owner/repo fix-bug - < prompt.md         # or from stdin
 ```
 
-A small shell function makes this a habit (in your laptop's `~/.zshrc`; opens `$EDITOR`, then sends the result;
-`$EDITOR` must block until the file is closed, e.g. `code --wait`):
-
-```bash
-anew() { f=$(mktemp); ${VISUAL:-${EDITOR:-vi}} "$f" && [ -s "$f" ] && ssh perseus agent new "$@" - < "$f"; rm -f "$f"; }   # anew -s owner/repo name
-alias pa='ssh -t perseus agent'     # pa ls, pa attach fix-bug, pa pr fix-bug
-```
+If you connect with an editor that supports remote sessions, point `EDITOR` at it
+(e.g. `export EDITOR="code --wait"` on the server) so `--edit` opens in a real editor.
 
 Run the self-tests any time with `tests/lifecycle.sh` and `tests/sandbox.sh`.
 
