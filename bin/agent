@@ -12,6 +12,8 @@ AGENT_CMD="${AGENT_CMD:-claude}"
 MEM_MAX="${AGENT_MEM_MAX:-8G}"
 CPU_QUOTA="${AGENT_CPU_QUOTA:-800%}"
 BIN="$HOME/.local/bin/agent"
+PSTACK_MARKETPLACE="${AGENT_PSTACK_MARKETPLACE:-cursor/plugins}"
+PSTACK_PLUGIN="${AGENT_PSTACK_PLUGIN:-pstack@cursor-plugins}"
 
 # Sandbox (--sandbox) settings.
 IMAGE="${AGENT_IMAGE:-isengard-agent}"
@@ -48,7 +50,7 @@ usage: agent <command>
   rm <name> [--force]           stop the agent, remove its worktree/clone (branch is kept)
   clean [-n] [name...]          remove agents whose PR is merged (and delete their branch);
                                 keeps the rest. No names = every agent. -n = dry run
-  setup                         create ~/agents, default allowlist, install hooks
+  setup                         create ~/agents, default allowlist, install hooks and pstack
   image build                   build the sandbox image
   token set|status|rm           manage the Claude token the sandbox uses
 
@@ -510,6 +512,18 @@ install_hooks() {
   echo "hooks installed in $settings (backup: $settings.bak-*)"
 }
 
+# pstack (https://github.com/cursor/plugins/tree/main/pstack) is a Claude Code plugin; installing it at
+# user scope makes /pstack:poteto-mode etc. available to every host agent. Best effort: setup continues without it.
+install_pstack() {
+  if ! command -v claude >/dev/null; then echo "pstack: claude not found, skipped" >&2; return 0; fi
+  claude plugin marketplace add "$PSTACK_MARKETPLACE" >/dev/null 2>&1 || true   # already added is fine
+  if claude plugin install "$PSTACK_PLUGIN" >/dev/null 2>&1; then
+    echo "pstack installed ($PSTACK_PLUGIN); use /pstack:poteto-mode in an agent"
+  else
+    echo "pstack: 'claude plugin install $PSTACK_PLUGIN' failed; run it by hand" >&2
+  fi
+}
+
 write_allowlist() {
   mkdir -p "$AGENTS_HOME"
   if [[ ! -f "$ALLOWLIST" ]]; then
@@ -548,6 +562,7 @@ cmd_setup() {
   mkdir -p "$REPOS" "$WORK" "$STATE" "$HOME/.local/bin"
   write_allowlist
   install_hooks
+  [[ "${AGENT_NO_PSTACK:-0}" == 1 ]] || install_pstack
 }
 
 command -v tmux >/dev/null || die "tmux not found"
