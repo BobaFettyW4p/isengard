@@ -1,0 +1,29 @@
+name: tests
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  lifecycle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends tmux
+      - name: Run lifecycle test
+        run: bash tests/lifecycle.sh
+
+  sandbox:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends tmux podman
+      - name: Build sandbox image
+        run: podman build -t isengard-agent sandbox
+      - name: Run sandbox test
+        run: bash tests/sandbox.sh
