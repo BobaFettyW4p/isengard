@@ -7,6 +7,9 @@ set -euo pipefail
 AGENT_BIN="${AGENT_BIN:-$(cd "$(dirname "$0")/.." && pwd)/bin/agent}"
 T="$(mktemp -d)"
 export AGENTS_HOME="$T/agents"
+# Private HOME so the test never reads or writes the real ~/.claude.json.
+export HOME="$T/home"
+mkdir -p "$HOME"
 A="$AGENT_BIN"
 NAME=selftest-a
 
@@ -16,7 +19,15 @@ cleanup() {
 }
 trap cleanup EXIT
 
-fail() { echo "FAIL: $*" >&2; exit 1; }
+fail() {
+  echo "FAIL: $*" >&2
+  if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
+    local d; d="$({ "$A" ls; "$A" log; for s in $(tmux list-sessions -F '#S' 2>/dev/null); do echo "--- $s"; tmux capture-pane -p -t "$s" -S -20; done; } 2>&1 || true)"
+    d="${d//'%'/%25}"; d="${d//$'\n'/%0A}"
+    echo "::error::FAIL: $*%0A$d"
+  fi
+  exit 1
+}
 pass() { echo "ok   - $*"; }
 
 status_of() { "$A" ls | awk -v n="$1" '$1 == n { print $3 }'; }
@@ -40,6 +51,9 @@ git clone -q "$T/origin.git" "$T/repo" 2>/dev/null
   git push -q origin main
   git remote set-head origin main >/dev/null
 )
+
+# Claude records folder trust per repo; without it the first agent is parked at needs-you.
+printf '{"projects":{"%s":{"hasTrustDialogAccepted":true}}}\n' "$(cd "$T/repo" && pwd -P)" > "$HOME/.claude.json"
 
 # Fake agent: walks through working -> needs-you -> done, then sends Claude's
 # idle reminder, which must not mask "done".
