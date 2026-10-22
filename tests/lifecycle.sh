@@ -146,4 +146,32 @@ if command -v python3 >/dev/null 2>&1; then
   pass "agent new --edit runs the editor and uses its result"
 fi
 
+# clean: only agents whose merged PR ends exactly at the branch tip are removed.
+mkdir -p "$T/bin"
+cat > "$T/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == *"--state merged"* && -n "${GH_FAKE_SHA:-}" ]]; then echo "$GH_FAKE_SHA"; fi
+exit 0
+EOF
+chmod +x "$T/bin/gh"
+for n in cleana cleanb; do AGENT_CMD="$T/argv.sh" "$A" new "$T/repo" "$n" x >/dev/null 2>&1 || fail "agent new $n"; done
+git -C "$AGENTS_HOME/work/repo-cleana" -c user.name=t -c user.email=t@t commit -q --allow-empty -m work
+tip_a="$(git -C "$T/repo" rev-parse refs/heads/agent/cleana)"
+out="$(PATH="$T/bin:$PATH" "$A" clean 2>&1)"
+grep -q "keep  cleana" <<<"$out" || fail "clean should keep unmerged cleana: $out"
+[[ -e "$AGENTS_HOME/state/cleana.env" ]] || fail "clean removed an unmerged agent"
+pass "clean keeps agents with no merged PR"
+out="$(GH_FAKE_SHA="$tip_a" PATH="$T/bin:$PATH" "$A" clean -n 2>&1)"
+grep -q "would clean cleana" <<<"$out" || fail "dry run: $out"
+grep -q "keep  cleanb" <<<"$out" || fail "dry run should keep cleanb: $out"
+[[ -e "$AGENTS_HOME/state/cleana.env" ]] || fail "dry run removed an agent"
+pass "clean -n changes nothing"
+out="$(GH_FAKE_SHA="$tip_a" PATH="$T/bin:$PATH" "$A" clean 2>&1)"
+grep -q "cleaned cleana" <<<"$out" || fail "clean: $out"
+[[ ! -e "$AGENTS_HOME/state/cleana.env" && ! -d "$AGENTS_HOME/work/repo-cleana" ]] || fail "cleana not removed"
+git -C "$T/repo" show-ref --verify --quiet refs/heads/agent/cleana && fail "cleana branch not deleted"
+[[ -e "$AGENTS_HOME/state/cleanb.env" ]] || fail "clean removed cleanb, whose PR does not match its tip"
+"$A" rm cleanb --force >/dev/null 2>&1 || true
+pass "clean removes merged agents and their branch, keeps the rest"
+
 echo "all passed"

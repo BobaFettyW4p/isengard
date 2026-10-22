@@ -32,6 +32,7 @@ agent peek fix-bug                # glance at recent output
 agent attach fix-bug              # watch live (detach: Ctrl-b d)
 agent diff fix-bug                # what it changed
 agent rm fix-bug                  # stop it, remove the worktree (branch kept)
+agent clean                       # after the PR merges: remove merged agents and their branches (-n to preview)
 
 # unattended, in a container with no prompts and no GitHub credentials:
 agent new --sandbox owner/repo fix-bug2 "Fix it"

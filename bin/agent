@@ -46,6 +46,8 @@ usage: agent <command>
   pr <name> [gh args]           push, then open a PR against the default branch
   log [n]                       recent events (needs-you / done)
   rm <name> [--force]           stop the agent, remove its worktree/clone (branch is kept)
+  clean [-n] [name...]          remove agents whose PR is merged (and delete their branch);
+                                keeps the rest. No names = every agent. -n = dry run
   setup                         create ~/agents, default allowlist, install hooks
   image build                   build the sandbox image
   token set|status|rm           manage the Claude token the sandbox uses
@@ -541,6 +543,40 @@ cmd_setup() {
 }
 
 command -v tmux >/dev/null || die "tmux not found"
+# Remove agents whose work has landed: a merged PR whose head is exactly the branch tip.
+# Anything else (no PR, open PR, commits after the merge, uncommitted changes) is kept.
+cmd_clean() {
+  local dry=0 names=() n f kept=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -n|--dry-run) dry=1 ;;
+      -*) die "unknown option: $1" ;;
+      *) names+=("$1") ;;
+    esac
+    shift
+  done
+  if (( ${#names[@]} == 0 )); then
+    shopt -s nullglob
+    for f in "$STATE"/*.env; do names+=("$(basename "$f" .env)"); done
+  fi
+  (( ${#names[@]} )) || { echo "no agents"; return; }
+  for n in "${names[@]}"; do
+    (
+      load "$n"
+      if is_sandbox; then sb_pull "$n" >/dev/null 2>&1 || true; fi   # newest commits onto the host branch
+      tip="$(git -C "$REPO" rev-parse --verify -q "refs/heads/$BRANCH" || true)"
+      [[ -n "$tip" ]] || { echo "keep  $n: no branch $BRANCH on the host (nothing committed)"; exit 3; }
+      merged="$(cd "$REPO" && gh pr list --head "$BRANCH" --state merged --json headRefOid --jq '.[].headRefOid' 2>/dev/null || true)"
+      grep -qx "$tip" <<<"$merged" || { echo "keep  $n: no merged PR ending at the tip of $BRANCH"; exit 3; }
+      if (( dry )); then echo "would clean $n (remove agent, delete $BRANCH)"; exit 0; fi
+      cmd_rm "$n" >/dev/null     # refuses (exit 1) if there are uncommitted changes
+      git -C "$REPO" branch -D "$BRANCH" >/dev/null
+      echo "cleaned $n (deleted $BRANCH)"
+    ) || kept=$((kept + 1))
+  done
+  (( kept == 0 )) || echo "$kept kept; 'agent rm <name>' removes one regardless"
+}
+
 case "${1:-}" in
   new)         shift; cmd_new "$@" ;;
   ls|list)     cmd_ls ;;
@@ -549,6 +585,7 @@ case "${1:-}" in
   diff)        shift; cmd_diff "$@" ;;
   log)         shift; cmd_log "$@" ;;
   rm)          shift; cmd_rm "$@" ;;
+  clean)       shift; cmd_clean "$@" ;;
   push)        shift; cmd_push "$@" ;;
   pr)          shift; cmd_pr "$@" ;;
   image)       shift; cmd_image "$@" ;;

@@ -17,6 +17,7 @@ agent push <name>                   push the agent's branch using the host's Git
 agent pr <name> [gh args]           push, then open a PR against the default branch
 agent log [n]                       recent needs-you / done events
 agent rm <name> [--force]           stop it, remove the worktree, keep the branch
+agent clean [-n] [name...]          after a merge: remove agents whose PR is merged and delete their branch
 agent setup                         create ~/agents, default allowlist, install hooks
 agent image build                   build the sandbox image
 agent token set|status|rm           manage the Claude token the sandbox uses
