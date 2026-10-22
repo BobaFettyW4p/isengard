@@ -32,11 +32,23 @@ agent peek fix-bug                # glance at recent output
 agent attach fix-bug              # watch live (detach: Ctrl-b d)
 agent diff fix-bug                # what it changed
 agent rm fix-bug                  # stop it, remove the worktree (branch kept)
+agent clean                       # after the PR merges: remove merged agents and their branches (-n to preview)
 
 # unattended, in a container with no prompts and no GitHub credentials:
 agent new --sandbox owner/repo fix-bug2 "Fix it"
 agent pr fix-bug2                 # pull its work out, push the branch, open a PR
 ```
+
+For long prompts, skip the command-line argument:
+
+```bash
+agent new --sandbox --edit owner/repo fix-bug      # write the prompt in $VISUAL/$EDITOR
+agent new --sandbox --file prompt.md owner/repo fix-bug
+agent new owner/repo fix-bug - < prompt.md         # or from stdin
+```
+
+If you connect with an editor that supports remote sessions, point `EDITOR` at it
+(e.g. `export EDITOR="code --wait"` on the server) so `--edit` opens in a real editor.
 
 Run the self-tests any time with `tests/lifecycle.sh` and `tests/sandbox.sh`.
 

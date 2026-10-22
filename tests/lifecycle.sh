@@ -110,4 +110,68 @@ tmux has-session -t agent-guardtest 2>/dev/null && fail "guard left a tmux sessi
 git -C "$T/repo" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
 pass "agent refuses to start on the default branch"
 
+# Task from stdin ("-"): arrives intact however long or oddly quoted; empty is refused.
+cat > "$T/argv.sh" <<EOF
+#!/usr/bin/env bash
+printf '%s' "\$1" > "$T/argv.out"
+sleep 60
+EOF
+chmod +x "$T/argv.sh"
+prompt=$'multi-line "quoted" $HOME `ticks` \'single\'\nsecond line'
+printf '%s\n' "$prompt" | AGENT_CMD="$T/argv.sh" "$A" new "$T/repo" stdintest - >/dev/null 2>&1 || fail "agent new with stdin task"
+for i in $(seq 1 30); do [[ -s "$T/argv.out" ]] && break; sleep 0.5; done
+[[ "$(cat "$T/argv.out")" == "$prompt" ]] || fail "stdin task mangled: $(cat "$T/argv.out")"
+"$A" rm stdintest --force >/dev/null 2>&1 || true
+if out="$(printf '  \n' | AGENT_CMD="$T/argv.sh" "$A" new "$T/repo" emptytest - 2>&1)"; then fail "empty stdin task accepted"; fi
+grep -q "empty task" <<<"$out" || fail "empty-task message missing: $out"
+[[ ! -e "$AGENTS_HOME/state/emptytest.env" ]] || fail "empty task left state behind"
+pass "agent new - reads the task from stdin"
+
+# --file: same payload from a file; --edit: from an editor (needs a tty, so run under a pty).
+rm -f "$T/argv.out"
+printf '%s\n' "$prompt" > "$T/prompt.md"
+AGENT_CMD="$T/argv.sh" "$A" new --file "$T/prompt.md" "$T/repo" filetest >/dev/null 2>&1 || fail "agent new --file"
+for i in $(seq 1 30); do [[ -s "$T/argv.out" ]] && break; sleep 0.5; done
+[[ "$(cat "$T/argv.out")" == "$prompt" ]] || fail "--file task mangled: $(cat "$T/argv.out")"
+"$A" rm filetest --force >/dev/null 2>&1 || true
+pass "agent new --file reads the task from a file"
+
+if command -v python3 >/dev/null 2>&1; then
+  rm -f "$T/argv.out"
+  printf '#!/usr/bin/env bash\ncp %q "$1"\n' "$T/prompt.md" > "$T/editor.sh"; chmod +x "$T/editor.sh"
+  EDITOR="$T/editor.sh" AGENT_CMD="$T/argv.sh" python3 -c 'import pty,sys,os; sys.exit(os.waitstatus_to_exitcode(pty.spawn(sys.argv[1:])))' "$A" new --edit "$T/repo" edittest >/dev/null 2>&1 || fail "agent new --edit"
+  for i in $(seq 1 30); do [[ -s "$T/argv.out" ]] && break; sleep 0.5; done
+  [[ "$(cat "$T/argv.out")" == "$prompt" ]] || fail "--edit task mangled: $(cat "$T/argv.out")"
+  "$A" rm edittest --force >/dev/null 2>&1 || true
+  pass "agent new --edit runs the editor and uses its result"
+fi
+
+# clean: only agents whose merged PR ends exactly at the branch tip are removed.
+mkdir -p "$T/bin"
+cat > "$T/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == *"--state merged"* && -n "${GH_FAKE_SHA:-}" ]]; then echo "$GH_FAKE_SHA"; fi
+exit 0
+EOF
+chmod +x "$T/bin/gh"
+for n in cleana cleanb; do AGENT_CMD="$T/argv.sh" "$A" new "$T/repo" "$n" x >/dev/null 2>&1 || fail "agent new $n"; done
+git -C "$AGENTS_HOME/work/repo-cleana" -c user.name=t -c user.email=t@t commit -q --allow-empty -m work
+tip_a="$(git -C "$T/repo" rev-parse refs/heads/agent/cleana)"
+out="$(PATH="$T/bin:$PATH" "$A" clean 2>&1)"
+grep -q "keep  cleana" <<<"$out" || fail "clean should keep unmerged cleana: $out"
+[[ -e "$AGENTS_HOME/state/cleana.env" ]] || fail "clean removed an unmerged agent"
+pass "clean keeps agents with no merged PR"
+out="$(GH_FAKE_SHA="$tip_a" PATH="$T/bin:$PATH" "$A" clean -n 2>&1)"
+grep -q "would clean cleana" <<<"$out" || fail "dry run: $out"
+grep -q "keep  cleanb" <<<"$out" || fail "dry run should keep cleanb: $out"
+[[ -e "$AGENTS_HOME/state/cleana.env" ]] || fail "dry run removed an agent"
+pass "clean -n changes nothing"
+out="$(GH_FAKE_SHA="$tip_a" PATH="$T/bin:$PATH" "$A" clean 2>&1)"
+grep -q "cleaned cleana" <<<"$out" || fail "clean: $out"
+[[ ! -e "$AGENTS_HOME/state/cleana.env" && ! -d "$AGENTS_HOME/work/repo-cleana" ]] || fail "cleana not removed"
+git -C "$T/repo" show-ref --verify --quiet refs/heads/agent/cleana && fail "cleana branch not deleted"
+[[ -e "$AGENTS_HOME/state/cleanb.env" ]] || fail "clean removed cleanb, whose PR does not match its tip"
+"$A" rm cleanb --force >/dev/null 2>&1 || true
+pass "clean removes merged agents and their branch, keeps the rest"
+
 echo "all passed"

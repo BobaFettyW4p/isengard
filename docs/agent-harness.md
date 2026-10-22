@@ -6,8 +6,9 @@ leaving it alone are the same thing: attach to look, detach to walk away. 2 to 4
 ## Commands
 
 ```
-agent new [--sandbox] <repo> <name> [task...]
-                                    new agent; task becomes the first prompt
+agent new [--sandbox] [--edit | --file <path>] <repo> <name> [task... | -]
+                                    new agent; task becomes the first prompt. For long prompts:
+                                    --edit opens $VISUAL/$EDITOR, --file reads a file, "-" reads stdin
 agent ls                            status, age and last output line for every agent
 agent peek <name> [lines]           print recent terminal output without attaching
 agent attach <name>                 attach to the tmux session (detach: Ctrl-b d)
@@ -16,6 +17,7 @@ agent push <name>                   push the agent's branch using the host's Git
 agent pr <name> [gh args]           push, then open a PR against the default branch
 agent log [n]                       recent needs-you / done events
 agent rm <name> [--force]           stop it, remove the worktree, keep the branch
+agent clean [-n] [name...]          after a merge: remove agents whose PR is merged and delete their branch
 agent setup                         create ~/agents, default allowlist, install hooks
 agent image build                   build the sandbox image
 agent token set|status|rm           manage the Claude token the sandbox uses
