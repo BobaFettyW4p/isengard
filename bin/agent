@@ -136,6 +136,9 @@ sb_pull() {
          -v "$WORKTREE:/work" -v "$dir:/out" "$IMAGE" \
          git bundle create /out/out.bundle "$BRANCH" "^$BASE_SHA" >/dev/null 2>&1; then
     echo "no commits on $BRANCH yet" >&2
+    if [[ -n "$(sb_git status --porcelain 2>/dev/null)" ]]; then
+      echo "the sandbox clone has uncommitted changes; ask the agent to commit them (or commit in $WORKTREE), then retry" >&2
+    fi
     return 1
   fi
   git -C "$REPO" -c fetch.fsckObjects=true fetch --quiet "$dir/out.bundle" "+refs/heads/$BRANCH:refs/heads/$BRANCH"
@@ -424,7 +427,7 @@ cmd_push() {
   local name="${1:?usage: agent push <name>}"
   load "$name"
   if is_sandbox; then
-    sb_pull "$name" || die "nothing to push: no commits on $BRANCH"
+    sb_pull "$name" || die "nothing to push"
   fi
   is_protected_branch "$REPO" "$BRANCH" && die "refusing to push protected branch '$BRANCH'"
   git -C "$REPO" remote get-url origin >/dev/null 2>&1 || die "repo has no origin remote"
