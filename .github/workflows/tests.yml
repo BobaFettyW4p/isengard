@@ -10,6 +10,8 @@ permissions:
 jobs:
   lifecycle:
     runs-on: ubuntu-latest
+    env:
+      AGENT_NO_SCOPE: "1"
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
@@ -19,6 +21,10 @@ jobs:
 
   sandbox:
     runs-on: ubuntu-latest
+    env:
+      AGENT_NO_SCOPE: "1"
+      AGENT_SANDBOX_CPUS: "2"
+      AGENT_SANDBOX_MEM: "2g"
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies

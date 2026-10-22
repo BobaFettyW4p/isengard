@@ -15,7 +15,15 @@ A="$AGENT_BIN"
 NAME=sbtest
 IMAGE="${AGENT_IMAGE:-isengard-agent}"
 
-fail() { echo "FAIL: $*" >&2; exit 1; }
+fail() {
+  echo "FAIL: $*" >&2
+  if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
+    local d; d="$({ "$A" ls; "$A" log; for s in $(tmux list-sessions -F '#S' 2>/dev/null); do echo "--- $s"; tmux capture-pane -p -t "$s" -S -20; done; } 2>&1 || true)"
+    d="${d//'%'/%25}"; d="${d//$'\n'/%0A}"
+    echo "::error::FAIL: $*%0A$d"
+  fi
+  exit 1
+}
 pass() { echo "ok   - $*"; }
 
 podman image exists "$IMAGE" || fail "image '$IMAGE' not found; build it first (agent image build)"
@@ -89,7 +97,7 @@ pass "ls marks sandbox agents [sb]"
 
 ev="$AGENTS_HOME/state/$NAME.d/evidence"
 [[ -f "$ev" ]] || fail "no evidence file"
-[[ "$(sed -n 1p "$ev")" == "$(id -u)" ]] || fail "container uid != host uid"
+[[ "$(sed -n 1p "$ev")" == 1000 ]] || fail "container user is not the image user (uid 1000)"
 grep -qx "ssh:none" "$ev"           || fail "ssh client visible in sandbox"
 grep -qx "ghdir:none" "$ev"         || fail "gh config visible in sandbox"
 grep -qx "hostrepo:hidden" "$ev"    || fail "host repo path visible in sandbox"
