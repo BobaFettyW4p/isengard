@@ -97,7 +97,7 @@ pass "ls marks sandbox agents [sb]"
 
 ev="$AGENTS_HOME/state/$NAME.d/evidence"
 [[ -f "$ev" ]] || fail "no evidence file"
-[[ "$(sed -n 1p "$ev")" == "$(id -u)" ]] || fail "container uid != host uid"
+[[ "$(sed -n 1p "$ev")" == 1000 ]] || fail "container user is not the image user (uid 1000)"
 grep -qx "ssh:none" "$ev"           || fail "ssh client visible in sandbox"
 grep -qx "ghdir:none" "$ev"         || fail "gh config visible in sandbox"
 grep -qx "hostrepo:hidden" "$ev"    || fail "host repo path visible in sandbox"

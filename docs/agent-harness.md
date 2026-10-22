@@ -115,7 +115,7 @@ Then: `agent new --sandbox owner/repo fix-it "task..."`, watch with `agent peek`
 **What the container has:** its own single-branch clone of the repo mounted at `/work`, a per-agent state
 directory at `/agent-state` (status and events), and the Claude token as an environment variable.
 **What it doesn't:** your home directory, the real repo, other agents' clones, SSH keys, GitHub credentials,
-any host config. It runs as your uid (`--userns=keep-id`) with all capabilities dropped,
+any host config. It runs as the image's `node` user, mapped to your uid (`--userns=keep-id:uid=1000,gid=1000`) with all capabilities dropped,
 `no-new-privileges`, and limits of 8 GB RAM, 8 CPUs and 2048 processes (`AGENT_SANDBOX_MEM`, `AGENT_SANDBOX_CPUS`).
 
 **Commit identity.** The container has no git config of its own, so without one every `git commit` inside it fails

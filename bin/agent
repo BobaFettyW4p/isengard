@@ -19,7 +19,7 @@ TOKEN_SECRET="${AGENT_TOKEN_SECRET:-claude-oauth-token}"
 SANDBOX_CMD="${AGENT_SANDBOX_CMD:-claude --dangerously-skip-permissions}"
 SANDBOX_MEM="${AGENT_SANDBOX_MEM:-8g}"
 SANDBOX_CPUS="${AGENT_SANDBOX_CPUS:-8}"
-SB_FLAGS=(--userns=keep-id --cap-drop=ALL --security-opt=no-new-privileges
+SB_FLAGS=(--userns=keep-id:uid=1000,gid=1000 --cap-drop=ALL --security-opt=no-new-privileges
           --memory="$SANDBOX_MEM" --cpus="$SANDBOX_CPUS" --pids-limit=2048 --tz=local)
 
 die() { echo "agent: $*" >&2; exit 1; }
