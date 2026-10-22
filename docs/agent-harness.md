@@ -18,7 +18,7 @@ agent pr <name> [gh args]           push, then open a PR against the default bra
 agent log [n]                       recent needs-you / done events
 agent rm <name> [--force]           stop it, remove the worktree, keep the branch
 agent clean [-n] [name...]          after a merge: remove agents whose PR is merged and delete their branch
-agent setup                         create ~/agents, default allowlist, install hooks
+agent setup                         create ~/agents, default allowlist, install hooks and pstack
 agent image build                   build the sandbox image
 agent token set|status|rm           manage the Claude token the sandbox uses
 ```
@@ -55,6 +55,20 @@ doesn't overwrite `done`.
 `agent setup` merges the four hooks into `~/.claude/settings.json` (existing settings are preserved, a timestamped
 backup is made, and it is idempotent). Hooks do nothing for Claude sessions not started by `agent`, because they
 check for `AGENT_NAME`.
+
+## pstack
+
+[pstack](https://github.com/cursor/plugins/tree/main/pstack) is a Claude Code plugin of engineering skills.
+Both kinds of agent get it, and its skills are namespaced, e.g. `/pstack:poteto-mode <task>` (or `/pstack:poteto-help`).
+
+- **Host agents:** `agent setup` runs `claude plugin marketplace add cursor/plugins` and
+  `claude plugin install pstack@cursor-plugins` (user scope, in `~/.claude`). Best effort; if it fails, setup still
+  completes and prints the command to run by hand. `AGENT_NO_PSTACK=1` skips it. Update with `claude plugin update`.
+- **Sandbox agents:** the Containerfile installs it at image build time (the container has no GitHub credentials to
+  fetch it later). `agent image build` again to pick up a newer version.
+- It is not pinned; pin a ref in both places if you want reproducibility.
+- `/pstack:setup-pstack` (model choices, written to `~/.claude/rules/pstack-models.md`) is interactive and not run for
+  you. Without it pstack falls back to its defaults (agents' own model). Run it once on the host if you want it there.
 
 State lives in `~/agents/state/<name>.env` and `<name>.status`; events in `~/agents/events.log`.
 
