@@ -26,7 +26,7 @@ Built: `agent new --sandbox` (see [agent-harness.md](agent-harness.md#sandbox-mo
 
 ## Later
 
-- **Task queue:** a GitHub issue labelled `agent` triggers a runner on the server, which makes a worktree, works the task, and opens a PR. A self-hosted Actions runner could be the trigger.
+- **Task queue (partly done):** `agent-inbox` takes requests from a sandboxed Claude session. Still to do: a GitHub issue labelled `agent` triggers a runner on the server, which makes a worktree, works the task, and opens a PR. A self-hosted Actions runner could be the trigger.
 - **Scheduled agents** via `systemd` timers: dependency bumps, flaky-test triage, health checks, daily digests.
 - **Builder plus reviewer:** a second agent with a fresh context and a stricter prompt reviews the first one's diff before it reaches a human.
 - **Phone push** when an agent finishes or is blocked (e.g. ntfy over Tailscale).

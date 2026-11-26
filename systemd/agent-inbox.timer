@@ -1,0 +1,10 @@
+[Unit]
+Description=Retry agent-inbox requests that were held at the active-agent cap
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=2min
+Unit=agent-inbox.service
+
+[Install]
+WantedBy=timers.target

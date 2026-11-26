@@ -33,3 +33,10 @@ jobs:
         run: podman build -t isengard-agent sandbox
       - name: Run sandbox test
         run: bash tests/sandbox.sh
+
+  inbox:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run inbox test
+        run: bash tests/inbox.sh

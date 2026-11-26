@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+# agent-inbox: lets a sandboxed Claude session ask the host to start sandboxed agents, without
+# giving that session podman, tmux, credentials or any write access beyond one request directory.
+#
+#   agent-inbox submit <repo> <task> <prompt-file>   write a request (any session; atomic)
+#   agent-inbox status <task>                         show what happened to a request
+#   agent-inbox run                                   process pending requests (host; systemd runs it)
+#
+# Everything in the request directory is untrusted input. `run` therefore:
+#   - never sources or evals a request: it parses one fixed key with a regex;
+#   - accepts only repos that were prepared on the host: a base clone, a host note
+#     (repos/<repo>.md) and an explicit opt-in file (repos/<repo>.conf, key IMAGE only);
+#   - never clones, never takes a path or URL, and only ever runs `agent new --sandbox`;
+#   - passes the prompt to `agent new --file`, never through a shell command line;
+#   - starts nothing beyond the active-agent cap.
+set -euo pipefail
+
+AGENTS_HOME="${AGENTS_HOME:-$HOME/agents}"
+INBOX="$AGENTS_HOME/inbox"
+REQ="$INBOX/requests"
+CLAIMED="$INBOX/claimed"
+RESULTS="$INBOX/results"
+AGENT="${AGENT_BIN:-$HOME/.local/bin/agent}"
+MAX_ACTIVE="${INBOX_MAX_ACTIVE:-4}"
+# Runs `agent new` in its own systemd scope so the tmux session outlives this oneshot service.
+# Set INBOX_WRAPPER="" to run it directly (tests, or a host without systemd --user).
+WRAPPER="${INBOX_WRAPPER-systemd-run --user --scope --quiet --}"
+MAX_PROMPT=32768
+NAME_RE='^[a-z0-9][a-z0-9-]{0,39}$'
+REPO_RE='^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$'
+IMAGE_RE='^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}$'
+
+die() { echo "agent-inbox: $*" >&2; exit 1; }
+log() { printf '%s %s\n' "$(date '+%F %T')" "$*" >> "$INBOX/log"; }
+
+cmd_submit() {
+  [[ $# -eq 3 ]] || die "usage: agent-inbox submit <repo> <task> <prompt-file>"
+  local repo="$1" task="$2" file="$3" size tmp
+  [[ "$repo" =~ $REPO_RE ]] || die "bad repo name '$repo'"
+  [[ "$task" =~ $NAME_RE ]] || die "bad task name '$task' (kebab-case, at most 40 characters)"
+  [[ -f "$file" && ! -L "$file" ]] || die "$file must be a regular file"
+  size="$(stat -c %s "$file")"
+  (( size > 0 && size <= MAX_PROMPT )) || die "prompt must be 1 to $MAX_PROMPT bytes (is $size)"
+  [[ -d "$REQ" ]] || die "no inbox at $REQ (run scripts/install-inbox.sh on the host)"
+  if [[ -e "$REQ/$task.env" || -e "$RESULTS/$task.result" || -e "$CLAIMED/$task.env" ]]; then
+    die "a request named '$task' already exists; pick a new task name"
+  fi
+  tmp="$(mktemp -d "$REQ/.tmp.XXXXXX")"
+  cp "$file" "$tmp/prompt"
+  printf 'REPO=%s\n' "$repo" > "$tmp/env"
+  # The prompt lands first; `run` only looks at *.env, so it never sees half a request.
+  mv "$tmp/prompt" "$REQ/$task.prompt"
+  mv "$tmp/env" "$REQ/$task.env"
+  rmdir "$tmp"
+  echo "submitted '$task' for $repo; check with: agent-inbox status $task"
+}
+
+cmd_status() {
+  [[ $# -eq 1 && "$1" =~ $NAME_RE ]] || die "usage: agent-inbox status <task>"
+  local task="$1"
+  if [[ -f "$RESULTS/$task.result" ]]; then cat "$RESULTS/$task.result"
+  elif [[ -e "$CLAIMED/$task.env" ]]; then echo "status=processing"
+  elif [[ -e "$REQ/$task.env" ]]; then echo "status=pending (the host has not picked it up yet)"
+  else echo "status=unknown"; fi
+}
+
+write_result() {  # write_result <task> <status> <detail>
+  local task="$1" status="$2" detail="$3" tmp
+  tmp="$(mktemp "$RESULTS/.result.XXXXXX")"
+  printf 'status=%s\ntime=%s\ndetail=%s\n' "$status" "$(date '+%F %T')" "$detail" > "$tmp"
+  mv "$tmp" "$RESULTS/$task.result"
+  log "$task $status: ${detail%%$'\n'*}"
+}
+
+# Reads IMAGE from repos/<repo>.conf without sourcing it. Prints the image; fails on any
+# line that is not blank, a comment, or IMAGE=<value>.
+read_conf_image() {
+  local conf="$1" line image="isengard-agent"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ -z "$line" || "$line" == \#* ]] && continue
+    if [[ "$line" =~ ^IMAGE=(.+)$ ]]; then image="${BASH_REMATCH[1]}"; else return 1; fi
+  done < "$conf"
+  [[ "$image" =~ $IMAGE_RE ]] || return 1
+  echo "$image"
+}
+
+active_agents() {
+  "$AGENT" ls 2>/dev/null | awk 'NR > 1 && ($3 == "working" || $3 == "needs-you") { n++ } END { print n + 0 }'
+}
+
+# Validates one claimed request. On success sets REPO_NAME and IMAGE_NAME; on failure prints
+# the reason and returns 1.
+validate() {
+  local task="$1" envf="$CLAIMED/$1.env" promptf="$CLAIMED/$1.prompt" line repo size conf
+  [[ -f "$envf" && ! -L "$envf" ]] || { REASON="request file is not a regular file"; return 1; }
+  [[ -f "$promptf" && ! -L "$promptf" ]] || { REASON="prompt file is missing or not a regular file"; return 1; }
+  size="$(stat -c %s "$envf")"
+  (( size <= 256 )) || { REASON="request file too large"; return 1; }
+  IFS= read -r line < "$envf" || true
+  [[ "$line" =~ ^REPO=(.+)$ ]] || { REASON="request must be exactly one line, REPO=<name>"; return 1; }
+  repo="${BASH_REMATCH[1]}"
+  [[ "$repo" =~ $REPO_RE ]] || { REASON="bad repo name"; return 1; }
+  (( size == ${#line} + 1 )) || { REASON="request has extra content"; return 1; }
+  size="$(stat -c %s "$promptf")"
+  (( size > 0 && size <= MAX_PROMPT )) || { REASON="prompt must be 1 to $MAX_PROMPT bytes"; return 1; }
+  [[ -n "$(tr -d '[:space:]' < "$promptf" | head -c 1)" ]] || { REASON="prompt is blank"; return 1; }
+  [[ -d "$AGENTS_HOME/repos/$repo/.git" ]] || { REASON="repo '$repo' has no base clone in $AGENTS_HOME/repos"; return 1; }
+  [[ -f "$AGENTS_HOME/repos/$repo.md" ]] || { REASON="repo '$repo' has no host note (repos/$repo.md); prep it first"; return 1; }
+  conf="$AGENTS_HOME/repos/$repo.conf"
+  [[ -f "$conf" && ! -L "$conf" ]] || { REASON="repo '$repo' is not enabled for the inbox (no repos/$repo.conf)"; return 1; }
+  IMAGE_NAME="$(read_conf_image "$conf")" || { REASON="repos/$repo.conf is invalid (only IMAGE=<image> is allowed)"; return 1; }
+  [[ ! -e "$AGENTS_HOME/state/$task.env" && ! -e "$RESULTS/$task.result" ]] || { REASON="an agent or request named '$task' already exists"; return 1; }
+  REPO_NAME="$repo"
+}
+
+cmd_run() {
+  [[ -d "$REQ" ]] || die "no inbox at $REQ (run scripts/install-inbox.sh)"
+  mkdir -p "$CLAIMED" "$RESULTS"
+  exec 9> "$INBOX/.lock"
+  flock -n 9 || exit 0
+  shopt -s nullglob
+  local envf task out rc wrapper=()
+  [[ -n "$WRAPPER" ]] && read -r -a wrapper <<< "$WRAPPER"
+  for envf in "$REQ"/*.env; do
+    task="$(basename "$envf" .env)"
+    if [[ ! "$task" =~ $NAME_RE ]]; then
+      log "dropped request with invalid name"
+      rm -f -- "$envf" "$REQ/$task.prompt"
+      continue
+    fi
+    if (( $(active_agents) >= MAX_ACTIVE )); then
+      log "at the cap of $MAX_ACTIVE active agents; leaving '$task' pending"
+      break
+    fi
+    # Claim before reading: after the move, the sandboxed writer can no longer touch the files.
+    mv -- "$envf" "$CLAIMED/$task.env"
+    [[ -e "$REQ/$task.prompt" || -L "$REQ/$task.prompt" ]] && mv -- "$REQ/$task.prompt" "$CLAIMED/$task.prompt"
+    REPO_NAME="" IMAGE_NAME="" REASON=""
+    if ! validate "$task"; then
+      write_result "$task" rejected "$REASON"
+      continue
+    fi
+    rc=0
+    out="$(env AGENT_IMAGE="$IMAGE_NAME" "${wrapper[@]}" timeout 300 "$AGENT" new --sandbox \
+            --file "$CLAIMED/$task.prompt" "$REPO_NAME" "$task" 2>&1)" || rc=$?
+    if (( rc == 0 )); then
+      write_result "$task" launched "repo=$REPO_NAME image=$IMAGE_NAME; watch with: agent peek $task"
+    else
+      write_result "$task" failed "agent new exited $rc: $(printf '%s' "$out" | tail -c 1500)"
+    fi
+  done
+}
+
+case "${1:-}" in
+  submit) shift; cmd_submit "$@" ;;
+  status) shift; cmd_status "$@" ;;
+  run) shift; cmd_run ;;
+  *) die "usage: agent-inbox submit <repo> <task> <prompt-file> | status <task> | run" ;;
+esac

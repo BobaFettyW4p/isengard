@@ -198,3 +198,36 @@ push (to a local bare origin) and teardown. It needs the image built.
 `tests/lifecycle.sh` drives a fake agent through working, needs-you and done in a temp `AGENTS_HOME`, and checks the
 worktree, branch, allowlist, statuses, idle-reminder handling, event log, `peek`, and `rm` (dirty refusal and `--force`).
 It makes no API calls and does not touch `~/agents` or `~/.claude`.
+
+## Inbox: starting agents from a sandboxed Claude session
+
+A Claude session under a strict sandbox cannot run podman or keep a tmux session alive, and should not be given
+the means to: it reads untrusted content. `agent-inbox` is a narrow channel instead of a hole in the sandbox.
+
+```
+agent-inbox submit <repo> <task> <prompt-file>   # the sandboxed session; writes a request
+agent-inbox status <task>                        # the sandboxed session; reads the outcome
+agent-inbox run                                  # the host; systemd path + timer units run it
+```
+
+A request is two files in `~/agents/inbox/requests/`: `<task>.prompt` and `<task>.env` (one line, `REPO=<name>`).
+`submit` writes them atomically. `run` claims a request (moves it to `inbox/claimed/`, out of the writer's reach),
+validates it, and runs `agent new --sandbox --file <prompt> <repo> <task>` in its own systemd scope so the tmux
+session outlives the service. The outcome is `inbox/results/<task>.result` (`launched`, `rejected` or `failed`,
+with the reason or the agent's output).
+
+What `run` accepts:
+
+- **Only prepared repos.** `repos/<repo>/.git` (a base clone), `repos/<repo>.md` (the host note) and
+  `repos/<repo>.conf` (the opt-in: blank lines, comments, and `IMAGE=<image>`; the image defaults to
+  `isengard-agent`). It never clones and never takes a path or URL.
+- **Strict names.** Task `[a-z0-9][a-z0-9-]{0,39}`, repo `[A-Za-z0-9][A-Za-z0-9_.-]{0,63}`, and the task must not
+  already be an agent or a result.
+- **Data, not code.** Requests are parsed with a regex, never sourced; symlinks, extra lines, blank or oversized
+  prompts (over 32 KB) are rejected; the prompt reaches `agent new` as a file.
+- **The cap.** At `INBOX_MAX_ACTIVE` (default 4) working or needs-you agents, requests stay pending; the timer retries.
+- **Nothing outward-facing.** It only starts agents. `agent pr`, `rm`, `token` and `git push` stay with a person.
+
+Install on the host (outside any sandbox): `scripts/install-inbox.sh`. The sandboxed session needs write access to
+`~/agents/inbox/requests` only (Claude Code setting `sandbox.filesystem.allowWrite`). For a headless server, also
+`loginctl enable-linger $USER`, or the watcher stops at logout.

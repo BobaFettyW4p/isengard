@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch ~/agents/inbox/requests for new agent requests
+
+[Path]
+PathChanged=%h/agents/inbox/requests
+Unit=agent-inbox.service
+
+[Install]
+WantedBy=default.target
