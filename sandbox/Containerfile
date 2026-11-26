@@ -1,6 +1,6 @@
 # Sandbox image for unattended Claude Code agents.
 # Holds the toolchain only: no host secrets, no git credentials, no ssh client.
-FROM docker.io/library/node:22-bookworm-slim
+FROM docker.io/library/node:22-trixie-slim
 
 ARG CLAUDE_CODE_VERSION=latest
 
